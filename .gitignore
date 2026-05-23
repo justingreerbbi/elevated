@@ -2,4 +2,5 @@ storage/*.sqlite
 storage/*.sqlite-*
 config.php
 config.local.php
-assets/.DS_Store
+.DS_Store
+
