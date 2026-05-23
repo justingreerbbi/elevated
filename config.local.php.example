@@ -1,0 +1,7 @@
+<?php
+
+declare(strict_types=1);
+
+return [
+    'mapbox_token' => '<your-mapbox-public-token>',
+];
