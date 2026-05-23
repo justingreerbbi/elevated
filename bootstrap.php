@@ -42,7 +42,7 @@ function request_json(): array
 
     $decoded = json_decode($rawBody, true);
     if (!is_array($decoded)) {
-        throw new RuntimeException('Request body must be valid JSON.');
+        throw new InvalidArgumentException('Request body must be valid JSON.');
     }
 
     return $decoded;
