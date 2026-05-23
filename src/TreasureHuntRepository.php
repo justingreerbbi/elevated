@@ -29,30 +29,36 @@ final class TreasureHuntRepository
     public function listHunts(): array
     {
         $statement = $this->pdo->query(
-            'SELECT id, name, description, created_at, updated_at
+            'SELECT id, name, description, search_area_json, created_at, updated_at
              FROM hunts
              ORDER BY updated_at DESC, id DESC'
         );
 
-        return $statement->fetchAll() ?: [];
+        return array_map([$this, 'hydrateHunt'], $statement->fetchAll() ?: []);
     }
 
     public function createHunt(array $input): array
     {
         $name = trim((string) ($input['name'] ?? ''));
         $description = trim((string) ($input['description'] ?? ''));
+        $searchArea = $this->normalizeSearchArea($input['search_area'] ?? null);
 
         if ($name === '') {
             throw new InvalidArgumentException('Hunt name is required.');
         }
 
+        if ($searchArea === null) {
+            throw new InvalidArgumentException('A hunt search area polygon is required.');
+        }
+
         $statement = $this->pdo->prepare(
-            'INSERT INTO hunts (name, description, created_at, updated_at)
-             VALUES (:name, :description, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
+            'INSERT INTO hunts (name, description, search_area_json, created_at, updated_at)
+             VALUES (:name, :description, :search_area_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
         );
         $statement->execute([
             ':name' => $name,
             ':description' => $description,
+            ':search_area_json' => json_encode($searchArea, JSON_THROW_ON_ERROR),
         ]);
 
         return $this->findHunt((int) $this->pdo->lastInsertId());
@@ -63,15 +69,23 @@ final class TreasureHuntRepository
         $hunt = $this->findHunt($huntId);
         $name = trim((string) ($input['name'] ?? $hunt['name']));
         $description = trim((string) ($input['description'] ?? $hunt['description']));
+        $searchArea = array_key_exists('search_area', $input)
+            ? $this->normalizeSearchArea($input['search_area'])
+            : $hunt['search_area'];
 
         if ($name === '') {
             throw new InvalidArgumentException('Hunt name is required.');
+        }
+
+        if ($searchArea === null) {
+            throw new InvalidArgumentException('A hunt search area polygon is required.');
         }
 
         $statement = $this->pdo->prepare(
             'UPDATE hunts
              SET name = :name,
                  description = :description,
+                 search_area_json = :search_area_json,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = :id'
         );
@@ -79,6 +93,7 @@ final class TreasureHuntRepository
             ':id' => $huntId,
             ':name' => $name,
             ':description' => $description,
+            ':search_area_json' => json_encode($searchArea, JSON_THROW_ON_ERROR),
         ]);
 
         return $this->findHunt($huntId);
@@ -199,7 +214,7 @@ final class TreasureHuntRepository
     private function findHunt(int $huntId): array
     {
         $statement = $this->pdo->prepare(
-            'SELECT id, name, description, created_at, updated_at
+            'SELECT id, name, description, search_area_json, created_at, updated_at
              FROM hunts
              WHERE id = :id'
         );
@@ -210,7 +225,47 @@ final class TreasureHuntRepository
             throw new RuntimeException('Hunt not found.');
         }
 
+        return $this->hydrateHunt($hunt);
+    }
+
+    private function hydrateHunt(array $hunt): array
+    {
+        $rawSearchArea = (string) ($hunt['search_area_json'] ?? '');
+        $hunt['search_area'] = null;
+
+        if ($rawSearchArea !== '') {
+            $decoded = json_decode($rawSearchArea, true, 512, JSON_THROW_ON_ERROR);
+            $hunt['search_area'] = is_array($decoded) ? $decoded : null;
+        }
+
+        unset($hunt['search_area_json']);
+
         return $hunt;
+    }
+
+    private function normalizeSearchArea(mixed $searchArea): ?array
+    {
+        if ($searchArea === null || $searchArea === '') {
+            return null;
+        }
+
+        if (!is_array($searchArea)) {
+            throw new InvalidArgumentException('Search area must be a valid GeoJSON polygon.');
+        }
+
+        if (($searchArea['type'] ?? null) !== 'Polygon') {
+            throw new InvalidArgumentException('Search area must be a polygon.');
+        }
+
+        $coordinates = $searchArea['coordinates'] ?? null;
+        if (!is_array($coordinates) || !isset($coordinates[0]) || !is_array($coordinates[0]) || count($coordinates[0]) < 4) {
+            throw new InvalidArgumentException('Search area polygon must have at least four points.');
+        }
+
+        return [
+            'type' => 'Polygon',
+            'coordinates' => $coordinates,
+        ];
     }
 
     private function findFeature(int $featureId): array

@@ -107,8 +107,10 @@
 		map: null,
 		draw: null,
 		mode: "browse",
+		huntDraft: null,
 		pendingFeature: null,
 		pendingDrawFeatureId: null,
+		pendingHuntAreaDrawId: null,
 		measurementCoords: [],
 		roadLayerIds: [],
 		peakLabelLayers: [],
@@ -145,6 +147,7 @@
 		toggleParksBorders: $("#toggle-parks-borders"),
 		toggleGrid: $("#toggle-grid"),
 		toggleCoords: $("#toggle-coords"),
+		toggleHuntAreas: $("#toggle-hunt-areas"),
 		infoModal: $("#info-modal"),
 		infoKicker: $("#info-kicker"),
 		infoTitle: $("#info-title"),
@@ -270,6 +273,21 @@
 				name: feature.name,
 				description: feature.description,
 				color: feature.color,
+			},
+		};
+	}
+
+	function huntAreaToGeoJson(hunt) {
+		if (!hunt || !hunt.search_area) {
+			return null;
+		}
+
+		return {
+			type: "Feature",
+			geometry: hunt.search_area,
+			properties: {
+				huntId: hunt.id,
+				name: hunt.name,
 			},
 		};
 	}
@@ -515,6 +533,7 @@
 			state.draw.deleteAll();
 		}
 		state.pendingDrawFeatureId = null;
+		state.pendingHuntAreaDrawId = null;
 	}
 
 	function stopGeometryEditing() {
@@ -545,25 +564,48 @@
 	}
 
 	function openHuntModal(hunt) {
-		if (hunt) {
-			$("#hunt-id").val(String(hunt.id));
-			$("#hunt-name").val(hunt.name);
-			$("#hunt-description").val(hunt.description);
+		const draft = hunt ? {
+			id: hunt.id,
+			name: hunt.name || "",
+			description: hunt.description || "",
+			search_area: hunt.search_area || null,
+		} : (state.huntDraft || {
+			id: null,
+			name: "",
+			description: "",
+			search_area: null,
+		});
+
+		state.huntDraft = draft;
+		if (draft.id) {
+			$("#hunt-id").val(String(draft.id));
+			$("#hunt-name").val(draft.name);
+			$("#hunt-description").val(draft.description);
 			$("#hunt-modal-title").text("Edit Hunt");
 			$("#hunt-modal-kicker").text("Update Hunt");
 		} else {
-			resetHuntForm();
+			$("#hunt-id").val("");
+			$("#hunt-name").val(draft.name);
+			$("#hunt-description").val(draft.description);
 			$("#hunt-modal-title").text("Create Hunt");
 			$("#hunt-modal-kicker").text("Hunt Project");
 		}
+		syncHuntAreaSummary();
 		selectors.huntModal.removeClass("hidden");
 		syncOverlayState();
 	}
 
-	function closeHuntModal() {
+	function hideHuntModal() {
 		selectors.huntModal.addClass("hidden");
-		resetHuntForm();
 		syncOverlayState();
+	}
+
+	function closeHuntModal() {
+		hideHuntModal();
+		if (state.mode === "hunt-area") {
+			setMode("browse");
+		}
+		resetHuntForm();
 	}
 
 	function syncPreferencesForm() {
@@ -716,6 +758,41 @@
 		$("#hunt-id").val("");
 		$("#hunt-name").val("");
 		$("#hunt-description").val("");
+		state.huntDraft = null;
+		syncHuntAreaSummary();
+	}
+
+	function areaSummary(searchArea) {
+		if (!searchArea) {
+			return {
+				title: "Search area required",
+				body: "Click the map and draw a polygon to define where this hunt takes place.",
+			};
+		}
+
+		const areaSqMeters = turf.area({ type: "Feature", geometry: searchArea, properties: {} });
+		const bounds = turf.bbox({ type: "Feature", geometry: searchArea, properties: {} });
+		return {
+			title: `Area saved: ${formatArea(areaSqMeters)}`,
+			body: `Bounds ${formatCoordinate(bounds[1])}, ${formatCoordinate(bounds[0])} to ${formatCoordinate(bounds[3])}, ${formatCoordinate(bounds[2])}`,
+		};
+	}
+
+	function syncHuntDraftFromForm() {
+		if (!state.huntDraft) {
+			state.huntDraft = { id: null, name: "", description: "", search_area: null };
+		}
+
+		state.huntDraft.id = $("#hunt-id").val() ? Number($("#hunt-id").val()) : null;
+		state.huntDraft.name = $("#hunt-name").val().trim();
+		state.huntDraft.description = $("#hunt-description").val().trim();
+	}
+
+	function syncHuntAreaSummary() {
+		const summary = areaSummary(state.huntDraft && state.huntDraft.search_area ? state.huntDraft.search_area : null);
+		$("#hunt-area-summary").html(`<strong>${escapeHtml(summary.title)}</strong><p>${escapeHtml(summary.body)}</p>`);
+		$("#clear-hunt-area").toggleClass("hidden", !(state.huntDraft && state.huntDraft.search_area));
+		$("#define-hunt-area span").text(state.huntDraft && state.huntDraft.search_area ? "Redraw search area" : "Draw search area");
 	}
 
 	function renderHunts() {
@@ -723,17 +800,23 @@
 		if (!state.hunts.length) {
 			selectors.huntList.append('<div class="empty-state">No hunts yet.</div>');
 			selectors.activeHuntName.text("No active hunt");
+			updateHuntAreaSource();
 			return;
 		}
 
 		state.hunts.forEach((hunt) => {
+			const summary = areaSummary(hunt.search_area || null);
 			const item = $(
 				`<div class="hunt-item${hunt.id === state.activeHuntId ? " active" : ""}" data-id="${hunt.id}">
 					<div class="item-main">
 						<h3>${escapeHtml(hunt.name)}</h3>
 						<p>${escapeHtml(hunt.description || "No notes")}</p>
+						<div class="item-meta">
+							<span class="item-chip">${escapeHtml(summary.title)}</span>
+						</div>
 					</div>
 					<div class="item-actions">
+						<button type="button" class="mini-button focus-hunt-area" aria-label="Locate hunt area"><i class="fa-solid fa-expand"></i></button>
 						<button type="button" class="mini-button edit-hunt" aria-label="Edit hunt"><i class="fa-solid fa-pen"></i></button>
 						<button type="button" class="mini-button delete delete-hunt" aria-label="Delete hunt"><i class="fa-solid fa-trash"></i></button>
 					</div>
@@ -748,6 +831,9 @@
 			item.find(".edit-hunt").on("click", function () {
 				openHuntModal(hunt);
 			});
+			item.find(".focus-hunt-area").on("click", function () {
+				focusHuntArea(hunt);
+			});
 			item.find(".delete-hunt").on("click", function () {
 				deleteHunt(hunt.id);
 			});
@@ -756,6 +842,16 @@
 
 		const hunt = currentHunt();
 		selectors.activeHuntName.text(hunt ? hunt.name : "No active hunt");
+		updateHuntAreaSource();
+	}
+
+	function focusHuntArea(hunt) {
+		if (!state.map || !hunt || !hunt.search_area) {
+			return;
+		}
+
+		const bounds = turf.bbox({ type: "Feature", geometry: hunt.search_area, properties: {} });
+		state.map.fitBounds(bounds, { padding: 100, duration: 900 });
 	}
 
 	function renderFeatures() {
@@ -835,6 +931,7 @@
 			publicLandOpacity: normalizePublicLandOpacity(state.preferences.publicLandOpacity),
 			gridVisible: selectors.toggleGrid.is(":checked"),
 			coordsVisible: selectors.toggleCoords.is(":checked"),
+			huntAreaVisible: selectors.toggleHuntAreas.is(":checked"),
 		};
 
 		window.clearTimeout(state.saveStateDebounce);
@@ -849,9 +946,36 @@
 		state.activeHuntId = huntId;
 		renderHunts();
 		renderFeatures();
+		updateHuntAreaSource();
 		if (persist) {
 			saveMapState();
 		}
+	}
+
+	function applyHuntAreaVisibility() {
+		if (!state.mapLoaded || !state.map) {
+			return;
+		}
+
+		const visibility = selectors.toggleHuntAreas.is(":checked") ? "visible" : "none";
+		["hunt-search-area-fill", "hunt-search-area-line"].forEach(function (layerId) {
+			if (state.map.getLayer(layerId)) {
+				state.map.setLayoutProperty(layerId, "visibility", visibility);
+			}
+		});
+	}
+
+	function updateHuntAreaSource() {
+		if (!state.mapLoaded || !state.map || !state.map.getSource("hunt-search-area")) {
+			return;
+		}
+
+		const feature = huntAreaToGeoJson(currentHunt());
+		state.map.getSource("hunt-search-area").setData({
+			type: "FeatureCollection",
+			features: feature ? [feature] : [],
+		});
+		applyHuntAreaVisibility();
 	}
 
 	function ensureActiveHunt() {
@@ -1280,6 +1404,11 @@
 			data: { type: "FeatureCollection", features: [] },
 		});
 
+		state.map.addSource("hunt-search-area", {
+			type: "geojson",
+			data: { type: "FeatureCollection", features: [] },
+		});
+
 		state.map.addSource("grid-lines", {
 			type: "geojson",
 			data: { type: "FeatureCollection", features: [] },
@@ -1334,6 +1463,33 @@
 			paint: {
 				"line-color": ["get", "color"],
 				"line-width": 2,
+			},
+		});
+
+		state.map.addLayer({
+			id: "hunt-search-area-fill",
+			type: "fill",
+			source: "hunt-search-area",
+			paint: {
+				"fill-color": "#9be5c7",
+				"fill-opacity": 0.08,
+			},
+			layout: {
+				visibility: "none",
+			},
+		});
+
+		state.map.addLayer({
+			id: "hunt-search-area-line",
+			type: "line",
+			source: "hunt-search-area",
+			paint: {
+				"line-color": "#9be5c7",
+				"line-width": 2,
+				"line-dasharray": [2, 1.2],
+			},
+			layout: {
+				visibility: "none",
 			},
 		});
 
@@ -2040,7 +2196,7 @@
 	function setMode(nextMode) {
 		state.mode = nextMode;
 		syncModeBadge();
-		if (nextMode !== "polygon") {
+		if (nextMode !== "polygon" && nextMode !== "hunt-area") {
 			clearPolygonEditing();
 		}
 
@@ -2068,11 +2224,28 @@
 		}
 		if (nextMode === "polygon") {
 			setStatus("Draw polygon");
-			state.draw.changeMode("draw_polygon");
+			if (state.draw) {
+				state.draw.changeMode("draw_polygon");
+			}
+		}
+		if (nextMode === "hunt-area") {
+			setStatus("Draw hunt area");
+			if (state.draw) {
+				state.draw.changeMode("draw_polygon");
+			}
 		}
 	}
 
 	function handleMapClick(event) {
+		if (state.ignoreNextMapClick) {
+			state.ignoreNextMapClick = false;
+			return;
+		}
+
+		if (state.mode === "polygon" || state.mode === "hunt-area") {
+			return;
+		}
+
 		if (state.mode === "browse" && state.mapLoaded) {
 			const rendered = state.map.queryRenderedFeatures(event.point, {
 				layers: ["hunt-markers-circle", "hunt-polygons-fill", "hunt-polygons-line"],
@@ -2148,6 +2321,20 @@
 		state.map.on("pitchend", saveMapState);
 
 		state.map.on("draw.create", function (event) {
+			if (state.mode === "hunt-area") {
+				state.pendingHuntAreaDrawId = event.features[0].id;
+				if (!state.huntDraft) {
+					state.huntDraft = { id: null, name: "", description: "", search_area: null };
+				}
+				state.huntDraft.search_area = event.features[0].geometry;
+				syncHuntAreaSummary();
+				state.ignoreNextMapClick = true;
+				setMode("browse");
+				openHuntModal(null);
+				showToast("Search area captured.");
+				return;
+			}
+
 			if (state.mode !== "polygon") {
 				return;
 			}
@@ -2156,6 +2343,7 @@
 				return;
 			}
 			state.pendingDrawFeatureId = event.features[0].id;
+			state.ignoreNextMapClick = true;
 			openFeatureEditor({
 				type: "polygon",
 				name: "",
@@ -2167,6 +2355,15 @@
 		});
 
 		state.map.on("draw.update", function () {
+			if (state.mode === "hunt-area" && state.pendingHuntAreaDrawId && state.huntDraft) {
+				const drawFeature = state.draw.get(state.pendingHuntAreaDrawId);
+				if (drawFeature) {
+					state.huntDraft.search_area = drawFeature.geometry;
+					syncHuntAreaSummary();
+				}
+				return;
+			}
+
 			if (!state.pendingDrawFeatureId || !state.pendingFeature) {
 				return;
 			}
@@ -2203,6 +2400,7 @@
 		updateGridOverlay();
 		updateMeasurementLayer();
 		updateMapSource();
+		updateHuntAreaSource();
 		renderFeatures();
 		updateCirclePreviewFromInputs();
 		setStatus("Ready");
@@ -2297,6 +2495,7 @@
 		selectors.toggleParksBorders.prop("checked", data.mapState ? data.mapState.parkBoundariesVisible !== false : true);
 		selectors.toggleGrid.prop("checked", data.mapState ? data.mapState.gridVisible !== false : true);
 		selectors.toggleCoords.prop("checked", data.mapState ? data.mapState.coordsVisible !== false : true);
+		selectors.toggleHuntAreas.prop("checked", data.mapState ? data.mapState.huntAreaVisible === true : false);
 
 		renderHunts();
 		renderFeatures();
@@ -2315,10 +2514,16 @@
 
 	function createOrUpdateHunt(event) {
 		event.preventDefault();
+		syncHuntDraftFromForm();
 		const payload = {
 			name: $("#hunt-name").val().trim(),
 			description: $("#hunt-description").val().trim(),
+			search_area: state.huntDraft && state.huntDraft.search_area ? state.huntDraft.search_area : null,
 		};
+		if (!payload.search_area) {
+			showToast("Draw a search area for the hunt first.", true);
+			return;
+		}
 		const huntId = Number($("#hunt-id").val() || 0);
 		const method = huntId ? "PATCH" : "POST";
 		const query = huntId ? { id: huntId } : null;
@@ -2461,6 +2666,22 @@
 		$("#open-hunt-modal").on("click", function () {
 			openHuntModal(null);
 		});
+		$("#define-hunt-area").on("click", function () {
+			syncHuntDraftFromForm();
+			hideHuntModal();
+			clearPolygonEditing();
+			showToast("Click the map to draw the hunt search area, then double-click to finish.", true);
+			setMode("hunt-area");
+		});
+		$("#clear-hunt-area").on("click", function () {
+			if (state.huntDraft) {
+				state.huntDraft.search_area = null;
+			}
+			if (state.mode === "hunt-area") {
+				setMode("browse");
+			}
+			syncHuntAreaSummary();
+		});
 		$("#open-preferences-modal").on("click", openPreferencesModal);
 		$("#close-hunt-modal, [data-close-hunt='true']").on("click", closeHuntModal);
 		$("#close-preferences-modal, #preferences-form-reset, [data-close-preferences='true']").on("click", closePreferencesModal);
@@ -2537,6 +2758,10 @@
 		});
 		selectors.toggleCoords.on("change", function () {
 			updateGridOverlay();
+			saveMapState();
+		});
+		selectors.toggleHuntAreas.on("change", function () {
+			applyHuntAreaVisibility();
 			saveMapState();
 		});
 

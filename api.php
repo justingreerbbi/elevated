@@ -2,6 +2,18 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/src/Installation.php';
+
+if (!Installation::isInstalled(__DIR__)) {
+    http_response_code(503);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'ok' => false,
+        'message' => 'Application is not installed. Visit the main site to run the installer.',
+    ], JSON_THROW_ON_ERROR);
+    exit;
+}
+
 require __DIR__ . '/bootstrap.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {

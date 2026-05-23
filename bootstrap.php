@@ -2,14 +2,11 @@
 
 declare(strict_types=1);
 
-$config = require __DIR__ . '/config.php';
+require_once __DIR__ . '/src/Installation.php';
 
-$localConfigPath = __DIR__ . '/config.local.php';
-if (is_file($localConfigPath)) {
-    $localConfig = require $localConfigPath;
-    if (is_array($localConfig)) {
-        $config = array_replace($config, $localConfig);
-    }
+$config = Installation::loadConfig(__DIR__);
+if (!is_array($config) || !Installation::isInstalled(__DIR__)) {
+    throw new RuntimeException('Application is not installed. Visit the site to complete setup.');
 }
 
 require_once __DIR__ . '/src/Database.php';

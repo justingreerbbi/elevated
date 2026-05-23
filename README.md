@@ -20,9 +20,18 @@ Treasure Hunt Mapper is a full-screen Mapbox and jQuery mapping tool with a PHP 
 
 ## Configuration
 
-1. Copy `config.php.example` to `config.php`.
-2. Copy `config.local.php.example` to `config.local.php`.
-3. Add your Mapbox public access token to either file, or set `MAPBOX_ACCESS_TOKEN` in your environment.
+On a fresh install, open the site in a browser and the installer will launch automatically if the app is not configured yet.
+
+The installer:
+
+- checks PHP and SQLite requirements
+- asks for the app name, Mapbox public token, map style, and database path
+- writes `config.php` with base defaults
+- writes `config.local.php` with your Mapbox token
+
+Once setup is complete, the installer route is locked and the application loads normally.
+
+If you prefer manual setup, copy `config.php.example` to `config.php`, copy `config.local.php.example` to `config.local.php`, and add your Mapbox public access token to either file or set `MAPBOX_ACCESS_TOKEN` in your environment.
 
 The app reads base defaults from `config.php` and local overrides from `config.local.php`.
 

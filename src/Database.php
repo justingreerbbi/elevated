@@ -33,10 +33,13 @@ final class Database
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT \'\',
+                search_area_json TEXT NOT NULL DEFAULT \'\',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )'
         );
+
+        self::ensureColumnExists($pdo, 'hunts', 'search_area_json', "ALTER TABLE hunts ADD COLUMN search_area_json TEXT NOT NULL DEFAULT ''");
 
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS features (
@@ -67,5 +70,19 @@ final class Database
              VALUES (1, \'{}\', CURRENT_TIMESTAMP)
              ON CONFLICT(id) DO NOTHING'
         );
+    }
+
+    private static function ensureColumnExists(PDO $pdo, string $table, string $column, string $alterSql): void
+    {
+        $statement = $pdo->query('PRAGMA table_info(' . $table . ')');
+        $columns = $statement ? $statement->fetchAll() : [];
+
+        foreach ($columns as $definition) {
+            if (($definition['name'] ?? null) === $column) {
+                return;
+            }
+        }
+
+        $pdo->exec($alterSql);
     }
 }
