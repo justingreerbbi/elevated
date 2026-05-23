@@ -89,6 +89,23 @@
 		"admin-region-boundary-overlay": 0.55,
 	};
 	const PUBLIC_LAND_INTERACTIVE_LAYER_IDS = PUBLIC_LAND_LAYER_DEFINITIONS.map((definition) => definition.layerId).concat(BORDER_LAYER_IDS);
+	const REASONING_DEFAULT_SETTINGS = {
+		cell_side_km: 10,
+		repeat_decay: 0.65,
+		category_caps: {
+			text: 8,
+			terrain: 8,
+			negative: 0.25,
+		},
+		negative_floor: 0.25,
+	};
+	const REASONING_BASE_BOOSTS = {
+		located_at: 6,
+		supports: 4,
+		references: 2,
+		contradicts: 0.35,
+	};
+	const REASONING_MAX_HEX_CANDIDATES = 1600;
 
 	const state = {
 		config: null,
@@ -103,13 +120,25 @@
 		currentStyle: null,
 		hunts: [],
 		features: [],
+		clues: [],
+		clueMapItems: [],
+		reasoningSettings: $.extend(true, {}, REASONING_DEFAULT_SETTINGS),
+		reasoningOverlayEnabled: false,
+		reasoningOverlayTimer: null,
+		reasoningOverlayRequestId: 0,
+		reasoningOverlayWarning: "",
+		reasoningCells: [],
+		reasoningCellsById: {},
 		activeHuntId: null,
 		map: null,
 		draw: null,
 		mode: "browse",
+		huntDraft: null,
 		pendingFeature: null,
 		pendingDrawFeatureId: null,
+		pendingHuntAreaDrawId: null,
 		measurementCoords: [],
+		bearingCoords: [],
 		roadLayerIds: [],
 		peakLabelLayers: [],
 		mapLoaded: false,
@@ -122,20 +151,32 @@
 		layerPanelOpen: false,
 		editorMarkers: [],
 		temporaryClickMarker: null,
+		reasoningBoard: null,
 	};
 
 	const selectors = {
 		appShell: $("#app-shell"),
 		huntList: $("#hunt-list"),
+		huntCount: $("#hunt-count"),
 		featureList: $("#feature-list"),
+		featureCount: $("#feature-count"),
 		featureForm: $("#feature-form"),
 		featureEmpty: $("#feature-empty"),
 		featureSummary: $("#feature-summary"),
+		clueList: $("#clue-list"),
+		clueCount: $("#clue-count"),
+		clueSummary: $("#clue-summary"),
+		clueEmpty: $("#clue-empty"),
+		boardCount: $("#board-count"),
+		boardSummary: $("#board-summary"),
+		boardEmpty: $("#reasoning-board-empty"),
+		reasoningBoard: $("#reasoning-board"),
 		modeBadge: $("#mode-badge"),
 		activeHuntName: $("#active-hunt-name"),
 		statusCard: $("#status-card"),
 		searchResults: $("#search-results"),
 		toast: $("#toast"),
+		mapCompassNeedle: $("#map-compass-needle"),
 		sidebar: $("#sidebar"),
 		showSidebar: $("#show-sidebar"),
 		toggleTerrain: $("#toggle-terrain"),
@@ -145,6 +186,9 @@
 		toggleParksBorders: $("#toggle-parks-borders"),
 		toggleGrid: $("#toggle-grid"),
 		toggleCoords: $("#toggle-coords"),
+		toggleHuntAreas: $("#toggle-hunt-areas"),
+		toggleReasoningOverlay: $("#toggle-reasoning-overlay"),
+		reasoningSummary: $("#reasoning-summary"),
 		infoModal: $("#info-modal"),
 		infoKicker: $("#info-kicker"),
 		infoTitle: $("#info-title"),
@@ -153,8 +197,11 @@
 		infoContent: $("#info-content"),
 		infoActions: $("#info-actions"),
 		huntModal: $("#hunt-modal"),
+		clueModal: $("#clue-modal"),
 		preferencesModal: $("#preferences-modal"),
 		layerPanel: $("#layer-panel"),
+		workspaceTabs: $(".workspace-tab"),
+		workspacePanels: $(".workspace-pane"),
 	};
 
 	function normalizePublicLandVisibility(value) {
@@ -188,6 +235,7 @@
 	function syncOverlayState() {
 		const hasModal = !selectors.infoModal.hasClass("hidden")
 			|| !selectors.huntModal.hasClass("hidden")
+			|| !selectors.clueModal.hasClass("hidden")
 			|| !selectors.preferencesModal.hasClass("hidden");
 		selectors.appShell.toggleClass("overlay-focus", hasModal);
 	}
@@ -198,7 +246,21 @@
 		selectors.showSidebar.toggleClass("hidden", !collapsed);
 	}
 
+	function setWorkspacePanel(panelName) {
+		selectors.workspaceTabs.toggleClass("active", false);
+		selectors.workspacePanels.toggleClass("active", false);
+		$(`.workspace-tab[data-workspace-tab="${panelName}"]`).addClass("active");
+		$(`.workspace-pane[data-workspace-panel="${panelName}"]`).addClass("active");
+		if (panelName === "board") {
+			window.setTimeout(renderReasoningBoard, 0);
+		}
+	}
+
 	function apiRequest(method, resource, data, query) {
+		if (window.Elevated && window.Elevated.api && typeof window.Elevated.api.request === "function") {
+			return window.Elevated.api.request(method, resource, data, query);
+		}
+
 		const url = new URL("api.php", window.location.href);
 		url.searchParams.set("resource", resource);
 		if (query) {
@@ -228,7 +290,20 @@
 	}
 
 	function setStatus(message) {
+		selectors.statusCard.removeClass("is-busy");
 		selectors.statusCard.text(message);
+	}
+
+	function setBusyStatus(message) {
+		selectors.statusCard.addClass("is-busy");
+		selectors.statusCard.text(message);
+	}
+
+	function clearBusyStatus(message) {
+		selectors.statusCard.removeClass("is-busy");
+		if (message) {
+			selectors.statusCard.text(message);
+		}
 	}
 
 	function escapeHtml(value) {
@@ -243,6 +318,10 @@
 
 	function visibleFeatures() {
 		return state.features.filter((feature) => feature.hunt_id === state.activeHuntId);
+	}
+
+	function visibleClues() {
+		return state.clues.filter((clue) => clue.hunt_id === state.activeHuntId);
 	}
 
 	function featureDisplayGeometry(feature) {
@@ -270,6 +349,21 @@
 				name: feature.name,
 				description: feature.description,
 				color: feature.color,
+			},
+		};
+	}
+
+	function huntAreaToGeoJson(hunt) {
+		if (!hunt || !hunt.search_area) {
+			return null;
+		}
+
+		return {
+			type: "Feature",
+			geometry: hunt.search_area,
+			properties: {
+				huntId: hunt.id,
+				name: hunt.name,
 			},
 		};
 	}
@@ -405,6 +499,13 @@
 		return `${Math.round(elevationMeters)} m`;
 	}
 
+	function formatPercent(value) {
+		if (!Number.isFinite(value)) {
+			return "0.00%";
+		}
+		return `${(value * 100).toFixed(value < 0.01 ? 3 : 2)}%`;
+	}
+
 	function toDms(value, positiveLabel, negativeLabel) {
 		const absolute = Math.abs(Number(value));
 		const degrees = Math.floor(absolute);
@@ -450,8 +551,10 @@
 			"browse": "Browse",
 			"add-marker": "Marker",
 			"add-circle": "Radius",
+			"add-line": "Line",
 			"polygon": "Polygon",
 			"measure": "Measure",
+			"bearing": "Bearing",
 		};
 		selectors.modeBadge.text(labels[state.mode] || "Browse");
 		$(".tool-button[data-tool]").removeClass("active");
@@ -467,6 +570,20 @@
 		if (state.mode === "measure") {
 			$('.tool-button[data-tool="measure"]').addClass("active");
 		}
+		if (state.mode === "bearing") {
+			$('.tool-button[data-tool="bearing"]').addClass("active");
+		}
+		if (state.mode === "add-line") {
+			$('.tool-button[data-tool="line"]').addClass("active");
+		}
+	}
+
+	function normalizedDegrees(value) {
+		return ((value % 360) + 360) % 360;
+	}
+
+	function formatDegrees(value) {
+		return `${normalizedDegrees(value).toFixed(1)}°`;
 	}
 
 	function makeEditorHandle(kind) {
@@ -515,6 +632,7 @@
 			state.draw.deleteAll();
 		}
 		state.pendingDrawFeatureId = null;
+		state.pendingHuntAreaDrawId = null;
 	}
 
 	function stopGeometryEditing() {
@@ -545,25 +663,48 @@
 	}
 
 	function openHuntModal(hunt) {
-		if (hunt) {
-			$("#hunt-id").val(String(hunt.id));
-			$("#hunt-name").val(hunt.name);
-			$("#hunt-description").val(hunt.description);
+		const draft = hunt ? {
+			id: hunt.id,
+			name: hunt.name || "",
+			description: hunt.description || "",
+			search_area: hunt.search_area || null,
+		} : (state.huntDraft || {
+			id: null,
+			name: "",
+			description: "",
+			search_area: null,
+		});
+
+		state.huntDraft = draft;
+		if (draft.id) {
+			$("#hunt-id").val(String(draft.id));
+			$("#hunt-name").val(draft.name);
+			$("#hunt-description").val(draft.description);
 			$("#hunt-modal-title").text("Edit Hunt");
 			$("#hunt-modal-kicker").text("Update Hunt");
 		} else {
-			resetHuntForm();
+			$("#hunt-id").val("");
+			$("#hunt-name").val(draft.name);
+			$("#hunt-description").val(draft.description);
 			$("#hunt-modal-title").text("Create Hunt");
 			$("#hunt-modal-kicker").text("Hunt Project");
 		}
+		syncHuntAreaSummary();
 		selectors.huntModal.removeClass("hidden");
 		syncOverlayState();
 	}
 
-	function closeHuntModal() {
+	function hideHuntModal() {
 		selectors.huntModal.addClass("hidden");
-		resetHuntForm();
 		syncOverlayState();
+	}
+
+	function closeHuntModal() {
+		hideHuntModal();
+		if (state.mode === "hunt-area") {
+			setMode("browse");
+		}
+		resetHuntForm();
 	}
 
 	function syncPreferencesForm() {
@@ -695,10 +836,12 @@
 	function resetFeatureForm() {
 		$("#feature-id").val("");
 		$("#feature-type").val("marker");
-		$("#feature-type-label").val("Marker");
 		$("#feature-name").val("");
 		$("#feature-description").val("");
 		$("#feature-color").val("#ff6b35");
+		$("#feature-category").val("reference");
+		$("#feature-status").val("active");
+		$("#feature-confidence").val("50");
 		$("#feature-lat").val("");
 		$("#feature-lng").val("");
 		$("#feature-radius").val("100");
@@ -716,24 +859,65 @@
 		$("#hunt-id").val("");
 		$("#hunt-name").val("");
 		$("#hunt-description").val("");
+		state.huntDraft = null;
+		syncHuntAreaSummary();
+	}
+
+	function areaSummary(searchArea) {
+		if (!searchArea) {
+			return {
+				title: "Search area optional",
+				body: "You can save this hunt now and draw a search area later.",
+			};
+		}
+
+		const areaSqMeters = turf.area({ type: "Feature", geometry: searchArea, properties: {} });
+		const bounds = turf.bbox({ type: "Feature", geometry: searchArea, properties: {} });
+		return {
+			title: `Area saved: ${formatArea(areaSqMeters)}`,
+			body: `Bounds ${formatCoordinate(bounds[1])}, ${formatCoordinate(bounds[0])} to ${formatCoordinate(bounds[3])}, ${formatCoordinate(bounds[2])}`,
+		};
+	}
+
+	function syncHuntDraftFromForm() {
+		if (!state.huntDraft) {
+			state.huntDraft = { id: null, name: "", description: "", search_area: null };
+		}
+
+		state.huntDraft.id = $("#hunt-id").val() ? Number($("#hunt-id").val()) : null;
+		state.huntDraft.name = $("#hunt-name").val().trim();
+		state.huntDraft.description = $("#hunt-description").val().trim();
+	}
+
+	function syncHuntAreaSummary() {
+		const summary = areaSummary(state.huntDraft && state.huntDraft.search_area ? state.huntDraft.search_area : null);
+		$("#hunt-area-summary").html(`<strong>${escapeHtml(summary.title)}</strong><p>${escapeHtml(summary.body)}</p>`);
+		$("#clear-hunt-area").toggleClass("hidden", !(state.huntDraft && state.huntDraft.search_area));
+		$("#define-hunt-area span").text(state.huntDraft && state.huntDraft.search_area ? "Redraw search area" : "Draw search area");
 	}
 
 	function renderHunts() {
 		selectors.huntList.empty();
+		selectors.huntCount.text(String(state.hunts.length));
 		if (!state.hunts.length) {
 			selectors.huntList.append('<div class="empty-state">No hunts yet.</div>');
 			selectors.activeHuntName.text("No active hunt");
+			updateHuntAreaSource();
 			return;
 		}
 
 		state.hunts.forEach((hunt) => {
+			const summary = areaSummary(hunt.search_area || null);
 			const item = $(
 				`<div class="hunt-item${hunt.id === state.activeHuntId ? " active" : ""}" data-id="${hunt.id}">
 					<div class="item-main">
 						<h3>${escapeHtml(hunt.name)}</h3>
-						<p>${escapeHtml(hunt.description || "No notes")}</p>
+						<div class="item-meta">
+							<span class="item-chip">${escapeHtml(summary.title)}</span>
+						</div>
 					</div>
 					<div class="item-actions">
+						<button type="button" class="mini-button focus-hunt-area" aria-label="Locate hunt area"><i class="fa-solid fa-expand"></i></button>
 						<button type="button" class="mini-button edit-hunt" aria-label="Edit hunt"><i class="fa-solid fa-pen"></i></button>
 						<button type="button" class="mini-button delete delete-hunt" aria-label="Delete hunt"><i class="fa-solid fa-trash"></i></button>
 					</div>
@@ -748,6 +932,9 @@
 			item.find(".edit-hunt").on("click", function () {
 				openHuntModal(hunt);
 			});
+			item.find(".focus-hunt-area").on("click", function () {
+				focusHuntArea(hunt);
+			});
 			item.find(".delete-hunt").on("click", function () {
 				deleteHunt(hunt.id);
 			});
@@ -756,6 +943,16 @@
 
 		const hunt = currentHunt();
 		selectors.activeHuntName.text(hunt ? hunt.name : "No active hunt");
+		updateHuntAreaSource();
+	}
+
+	function focusHuntArea(hunt) {
+		if (!state.map || !hunt || !hunt.search_area) {
+			return;
+		}
+
+		const bounds = turf.bbox({ type: "Feature", geometry: hunt.search_area, properties: {} });
+		state.map.fitBounds(bounds, { padding: 100, duration: 900 });
 	}
 
 	function renderFeatures() {
@@ -763,6 +960,7 @@
 		const hunt = currentHunt();
 
 		if (!hunt) {
+			selectors.featureCount.text("0");
 			selectors.featureSummary.text("No items");
 			selectors.featureEmpty.removeClass("hidden").text("Select a hunt to start.");
 			updateMapSource();
@@ -770,18 +968,24 @@
 		}
 
 		const features = visibleFeatures();
+		selectors.featureCount.text(String(features.length));
 		selectors.featureSummary.text(`${features.length} ${features.length === 1 ? "item" : "items"}`);
 		selectors.featureEmpty.toggleClass("hidden", features.length > 0);
 		if (!features.length) {
-			selectors.featureEmpty.text("No saved features.");
+			selectors.featureEmpty.text("No saved map items.");
 		}
 
 		features.forEach((feature) => {
+			const confidenceLabel = window.Elevated && window.Elevated.utils ? window.Elevated.utils.confidenceLabel(feature.confidence) : "";
 			const item = $(
 				`<div class="feature-item" data-id="${feature.id}">
 					<div class="item-main">
 						<h4><span class="feature-swatch" style="background:${escapeHtml(feature.color)}"></span>${escapeHtml(feature.name)}</h4>
-						<p>${escapeHtml(feature.description || feature.type)}</p>
+						<div class="item-meta">
+							<span class="item-chip">${escapeHtml(feature.type)}</span>
+							<span class="item-chip">${escapeHtml(feature.status || "active")}</span>
+							<span class="item-chip">${escapeHtml(String(feature.confidence ?? 50))}% ${escapeHtml(confidenceLabel)}</span>
+						</div>
 					</div>
 					<div class="item-actions">
 						<button type="button" class="mini-button zoom-feature" aria-label="Locate feature"><i class="fa-solid fa-crosshairs"></i></button>
@@ -810,6 +1014,291 @@
 		});
 
 		updateMapSource();
+		renderReasoningBoard();
+	}
+
+	function renderClueMapItemOptions(selectedIds) {
+		const selected = new Set((selectedIds || []).map((id) => Number(id)));
+		const options = visibleFeatures();
+		const select = $("#clue-map-items");
+		select.empty();
+		options.forEach((item) => {
+			const option = $("<option></option>")
+				.val(String(item.id))
+				.text(item.name || `Map item ${item.id}`);
+			if (selected.has(Number(item.id))) {
+				option.prop("selected", true);
+			}
+			select.append(option);
+		});
+	}
+
+	function resetClueForm() {
+		$("#clue-id").val("");
+		$("#clue-title").val("");
+		$("#clue-body").val("");
+		$("#clue-interpretation").val("");
+		$("#clue-status").val("open");
+		$("#clue-confidence").val("50");
+		renderClueMapItemOptions([]);
+	}
+
+	function openClueModal(clue) {
+		if (clue) {
+			const linkedMapItemIds = state.clueMapItems
+				.filter((link) => Number(link.clue_id) === Number(clue.id))
+				.map((link) => Number(link.map_item_id));
+			$("#clue-modal-title").text("Edit Clue");
+			$("#clue-id").val(String(clue.id));
+			$("#clue-title").val(clue.title || "");
+			$("#clue-body").val(clue.body || "");
+			$("#clue-interpretation").val(clue.interpretation || "");
+			$("#clue-status").val(clue.status || "open");
+			$("#clue-confidence").val(String(Number.isFinite(Number(clue.confidence)) ? Number(clue.confidence) : 50));
+			renderClueMapItemOptions(linkedMapItemIds);
+		} else {
+			$("#clue-modal-title").text("Create Clue");
+			resetClueForm();
+		}
+
+		selectors.clueModal.removeClass("hidden");
+		syncOverlayState();
+	}
+
+	function closeClueModal() {
+		selectors.clueModal.addClass("hidden");
+		resetClueForm();
+		syncOverlayState();
+	}
+
+	function renderClues() {
+		selectors.clueList.empty();
+		const hunt = currentHunt();
+
+		if (!hunt) {
+			selectors.clueCount.text("0");
+			selectors.boardCount.text("0");
+			selectors.boardSummary.text("No evidence graph");
+			selectors.clueSummary.text("No clues");
+			selectors.clueEmpty.removeClass("hidden").text("Select a hunt to add clues.");
+			renderReasoningBoard();
+			return;
+		}
+
+		const clues = visibleClues();
+		selectors.clueCount.text(String(clues.length));
+		selectors.clueSummary.text(`${clues.length} ${clues.length === 1 ? "clue" : "clues"}`);
+		selectors.clueEmpty.toggleClass("hidden", clues.length > 0);
+		if (!clues.length) {
+			selectors.clueEmpty.text("No saved clues.");
+		}
+
+		clues.forEach((clue) => {
+			const confidenceLabel = window.Elevated && window.Elevated.utils ? window.Elevated.utils.confidenceLabel(clue.confidence) : "";
+			const linkCount = state.clueMapItems.filter((link) => Number(link.clue_id) === Number(clue.id)).length;
+			const item = $(
+				`<div class="feature-item" data-id="${clue.id}">
+					<div class="item-main">
+						<h4>${escapeHtml(clue.title)}</h4>
+						<div class="item-meta">
+							<span class="item-chip">${escapeHtml(clue.status || "open")}</span>
+							<span class="item-chip">${escapeHtml(String(clue.confidence ?? 50))}% ${escapeHtml(confidenceLabel)}</span>
+							<span class="item-chip">${linkCount} links</span>
+						</div>
+					</div>
+					<div class="item-actions">
+						<button type="button" class="mini-button edit-clue" aria-label="Edit clue"><i class="fa-solid fa-pen"></i></button>
+						<button type="button" class="mini-button delete delete-clue" aria-label="Delete clue"><i class="fa-solid fa-trash"></i></button>
+					</div>
+				</div>`,
+			);
+			item.find(".edit-clue").on("click", function () {
+				openClueModal(clue);
+			});
+			item.find(".delete-clue").on("click", function () {
+				deleteClue(clue.id);
+			});
+			selectors.clueList.append(item);
+		});
+		renderReasoningBoard();
+	}
+
+	function reasoningBoardElements() {
+		const hunt = currentHunt();
+		if (!hunt) {
+			return [];
+		}
+
+		const features = visibleFeatures();
+		const clues = visibleClues();
+		const featureIds = new Set(features.map((feature) => Number(feature.id)));
+		const clueIds = new Set(clues.map((clue) => Number(clue.id)));
+		const elements = [];
+
+		elements.push({
+			data: {
+				id: `hunt-${hunt.id}`,
+				label: hunt.name || "Active Hunt",
+				type: "hunt",
+			},
+		});
+
+		clues.forEach((clue) => {
+			elements.push({
+				data: {
+					id: `clue-${clue.id}`,
+					label: clue.title || `Clue ${clue.id}`,
+					type: "clue",
+					status: clue.status || "open",
+				},
+			});
+			elements.push({
+				data: {
+					id: `hunt-${hunt.id}-clue-${clue.id}`,
+					source: `hunt-${hunt.id}`,
+					target: `clue-${clue.id}`,
+					label: "contains",
+					type: "contains",
+				},
+			});
+		});
+
+		features.forEach((feature) => {
+			elements.push({
+				data: {
+					id: `feature-${feature.id}`,
+					label: feature.name || `Map Item ${feature.id}`,
+					type: "feature",
+					status: feature.status || "active",
+				},
+			});
+		});
+
+		state.clueMapItems.forEach((link) => {
+			const clueId = Number(link.clue_id);
+			const mapItemId = Number(link.map_item_id);
+			if (!clueIds.has(clueId) || !featureIds.has(mapItemId)) {
+				return;
+			}
+			elements.push({
+				data: {
+					id: `link-${clueId}-${mapItemId}`,
+					source: `clue-${clueId}`,
+					target: `feature-${mapItemId}`,
+					label: link.relationship_type || "supports",
+					type: "supports",
+				},
+			});
+		});
+
+		return elements;
+	}
+
+	function renderReasoningBoard() {
+		const elements = reasoningBoardElements();
+		const hasBoardData = elements.length > 1;
+		const boardActive = $('.workspace-pane[data-workspace-panel="board"]').hasClass("active");
+		const canRenderBoard = hasBoardData && boardActive && typeof window.cytoscape === "function";
+		selectors.boardEmpty
+			.toggleClass("hidden", hasBoardData && (!boardActive || canRenderBoard))
+			.text(hasBoardData ? "Reasoning graph library failed to load." : "Select a hunt with clues or map items.");
+		selectors.reasoningBoard.toggleClass("hidden", !canRenderBoard);
+		selectors.boardCount.text(String(Math.max(0, elements.filter((element) => !element.data.source).length - 1)));
+		selectors.boardSummary.text(hasBoardData ? `${elements.length} graph elements` : "No evidence graph");
+
+		if (!canRenderBoard) {
+			if (!hasBoardData && state.reasoningBoard) {
+				state.reasoningBoard.destroy();
+				state.reasoningBoard = null;
+			}
+			return;
+		}
+
+		if (!state.reasoningBoard) {
+			state.reasoningBoard = window.cytoscape({
+				container: selectors.reasoningBoard[0],
+				style: [
+					{
+						selector: "node",
+						style: {
+							"background-color": "#2b3038",
+							"border-color": "#bfc6cc",
+							"border-width": 1,
+							"color": "#f1f3f4",
+							"font-size": 10,
+							"label": "data(label)",
+							"text-halign": "center",
+							"text-valign": "center",
+							"text-wrap": "wrap",
+							"text-max-width": 86,
+							"width": 86,
+							"height": 34,
+							"shape": "rectangle",
+						},
+					},
+					{
+						selector: 'node[type = "hunt"]',
+						style: {
+							"background-color": "#d03740",
+							"border-color": "#f04f58",
+							"width": 104,
+							"height": 40,
+						},
+					},
+					{
+						selector: 'node[type = "clue"]',
+						style: {
+							"background-color": "#24324a",
+						},
+					},
+					{
+						selector: 'node[type = "feature"]',
+						style: {
+							"background-color": "#263b32",
+						},
+					},
+					{
+						selector: "edge",
+						style: {
+							"curve-style": "bezier",
+							"line-color": "#7f8790",
+							"target-arrow-color": "#7f8790",
+							"target-arrow-shape": "triangle",
+							"label": "data(label)",
+							"font-size": 8,
+							"text-background-color": "#08090b",
+							"text-background-opacity": 0.85,
+							"text-background-padding": 2,
+							"color": "#c5cbd1",
+						},
+					},
+				],
+				layout: { name: "breadthfirst", directed: true, spacingFactor: 1.05 },
+				userZoomingEnabled: true,
+				userPanningEnabled: true,
+			});
+			state.reasoningBoard.on("tap", "node", function (event) {
+				const data = event.target.data();
+				if (data.type === "clue") {
+					const clue = state.clues.find((item) => `clue-${item.id}` === data.id);
+					if (clue) {
+						showClueReasoningDetails(clue);
+					}
+				}
+				if (data.type === "feature") {
+					const feature = state.features.find((item) => `feature-${item.id}` === data.id);
+					if (feature) {
+						focusFeature(feature);
+						showFeatureDetails(feature);
+					}
+				}
+			});
+		}
+
+		state.reasoningBoard.elements().remove();
+		state.reasoningBoard.add(elements);
+		state.reasoningBoard.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.05 }).run();
+		state.reasoningBoard.fit(undefined, 24);
 	}
 
 	function saveMapState() {
@@ -835,6 +1324,8 @@
 			publicLandOpacity: normalizePublicLandOpacity(state.preferences.publicLandOpacity),
 			gridVisible: selectors.toggleGrid.is(":checked"),
 			coordsVisible: selectors.toggleCoords.is(":checked"),
+			huntAreaVisible: selectors.toggleHuntAreas.is(":checked"),
+			reasoningOverlayVisible: selectors.toggleReasoningOverlay.is(":checked"),
 		};
 
 		window.clearTimeout(state.saveStateDebounce);
@@ -849,9 +1340,53 @@
 		state.activeHuntId = huntId;
 		renderHunts();
 		renderFeatures();
+		renderClues();
+		renderClueMapItemOptions();
+		updateHuntAreaSource();
+		loadReasoningSettings();
 		if (persist) {
 			saveMapState();
 		}
+	}
+
+	function applyHuntAreaVisibility() {
+		if (!state.mapLoaded || !state.map) {
+			return;
+		}
+
+		const visibility = selectors.toggleHuntAreas.is(":checked") ? "visible" : "none";
+		["hunt-search-area-fill", "hunt-search-area-line"].forEach(function (layerId) {
+			if (state.map.getLayer(layerId)) {
+				state.map.setLayoutProperty(layerId, "visibility", visibility);
+			}
+		});
+	}
+
+	function applyReasoningOverlayVisibility() {
+		if (!state.mapLoaded || !state.map) {
+			return;
+		}
+
+		const visibility = state.reasoningOverlayEnabled ? "visible" : "none";
+		["reasoning-hexes-fill", "reasoning-hexes-line"].forEach((layerId) => {
+			if (state.map.getLayer(layerId)) {
+				state.map.setLayoutProperty(layerId, "visibility", visibility);
+			}
+		});
+	}
+
+	function updateHuntAreaSource() {
+		if (!state.mapLoaded || !state.map || !state.map.getSource("hunt-search-area")) {
+			return;
+		}
+
+		const feature = huntAreaToGeoJson(currentHunt());
+		state.map.getSource("hunt-search-area").setData({
+			type: "FeatureCollection",
+			features: feature ? [feature] : [],
+		});
+		applyHuntAreaVisibility();
+		updateReasoningOverlay();
 	}
 
 	function ensureActiveHunt() {
@@ -1055,11 +1590,28 @@
 			rows.push({ label: "Perimeter", value: formatDistance(perimeterKm * 1000) });
 		}
 
+		if (feature.type === "line") {
+			const distanceMeters = turf.length({ type: "Feature", geometry: displayGeometry, properties: {} }, { units: "kilometers" }) * 1000;
+			rows.push({ label: "Length", value: formatDistance(distanceMeters) });
+		}
+
 		return rows.slice(0, 6);
 	}
 
 	function showFeatureDetails(feature) {
-		selectors.infoKicker.text("Saved Feature");
+		const relatedClues = state.clueMapItems
+			.filter((link) => Number(link.map_item_id) === Number(feature.id))
+			.map((link) => {
+				const clue = state.clues.find((item) => Number(item.id) === Number(link.clue_id));
+				return clue ? { clue, relationshipType: link.relationship_type } : null;
+			})
+			.filter(Boolean);
+
+		const relatedCluesHtml = relatedClues.length
+			? `<div class="info-section"><strong>Related Clues</strong><div class="info-detail-list">${relatedClues.map((entry) => `<div><span>${escapeHtml(entry.relationshipType || "supports")}</span><strong>${escapeHtml(entry.clue.title)}</strong></div>`).join("")}</div></div>`
+			: '<div class="info-section"><strong>Related Clues</strong><p class="info-note">No clues linked yet.</p></div>';
+
+		selectors.infoKicker.text("Saved Map Item");
 		selectors.infoTitle.text(feature.name);
 		selectors.infoSubtitle.text(feature.description || feature.type);
 		renderInfoGrid(featureMetricRows(feature));
@@ -1069,6 +1621,7 @@
 				<strong>${escapeHtml(feature.type.charAt(0).toUpperCase() + feature.type.slice(1))}</strong>
 				<p class="info-note">Review, edit, or delete.</p>
 			</div>
+			${relatedCluesHtml}
 		`);
 		renderModalActions([
 			{
@@ -1105,6 +1658,118 @@
 		openInfoModal();
 	}
 
+	function showReasoningCellDetails(cellId) {
+		const cell = state.reasoningCellsById[cellId];
+		if (!cell) {
+			return;
+		}
+
+		updateReasoningOverlay(cellId);
+		selectors.infoKicker.text("Reasoning Overlay");
+		selectors.infoTitle.text("Search Cell");
+		selectors.infoSubtitle.text("Bayesian-inspired spatial score");
+		renderInfoGrid([
+			{ label: "Rank", value: `${Math.round(cell.rank * 100)} / 100` },
+			{ label: "Prior", value: formatPercent(cell.priorChance) },
+			{ label: "Chance", value: formatPercent(cell.finalChance) },
+			{ label: "Log odds", value: Number.isFinite(cell.logOdds) ? cell.logOdds.toFixed(3) : "N/A" },
+		]);
+
+		const categoryHtml = Object.keys(cell.categoryMultipliers)
+			.map((category) => `<div><span>${escapeHtml(category)}</span><strong>${escapeHtml(Number(cell.categoryMultipliers[category]).toFixed(2))}</strong></div>`)
+			.join("");
+		const contributionHtml = cell.contributions.length
+			? cell.contributions.map((contribution) => `
+				<div class="reasoning-contribution">
+					<strong>${escapeHtml(contribution.clueTitle)}</strong>
+					<span>${escapeHtml(contribution.relationshipType)} ${escapeHtml(contribution.mapItemName)} | ${escapeHtml(contribution.category)} | x${escapeHtml(contribution.boost.toFixed(2))}</span>
+				</div>
+			`).join("")
+			: '<p class="info-note">No linked evidence affects this cell yet.</p>';
+
+		selectors.infoContent.html(`
+			<div class="info-section">
+				<strong>Category Multipliers</strong>
+				<div class="info-detail-list">${categoryHtml}</div>
+			</div>
+			<div class="info-section">
+				<strong>Top Contributions</strong>
+				${contributionHtml}
+			</div>
+		`);
+		selectors.featureForm.addClass("hidden");
+		renderModalActions([]);
+		openInfoModal();
+	}
+
+	function showClueReasoningDetails(clue) {
+		const linkedMapItems = state.clueMapItems
+			.filter((link) => Number(link.clue_id) === Number(clue.id))
+			.map((link) => {
+				const mapItem = state.features.find((item) => Number(item.id) === Number(link.map_item_id));
+				return mapItem ? { link, mapItem } : null;
+			})
+			.filter(Boolean);
+
+		selectors.infoKicker.text("Reasoning Board");
+		selectors.infoTitle.text(clue.title || "Clue");
+		selectors.infoSubtitle.text("Linked spatial evidence");
+		renderInfoGrid([
+			{ label: "Status", value: clue.status || "open" },
+			{ label: "Confidence", value: `${Number(clue.confidence || 0)}%` },
+			{ label: "Links", value: String(linkedMapItems.length) },
+			{ label: "Overlay", value: state.reasoningOverlayEnabled ? "On" : "Off" },
+		]);
+		selectors.infoContent.html(`
+			<div class="info-section">
+				<strong>Linked Map Items</strong>
+				${linkedMapItems.length ? linkedMapItems.map((entry) => `
+					<div class="reasoning-contribution">
+						<strong>${escapeHtml(entry.mapItem.name)}</strong>
+						<span>${escapeHtml(entry.link.relationship_type || "supports")} | ${escapeHtml(entry.mapItem.category || "reference")} | ${escapeHtml(entry.mapItem.type || "marker")}</span>
+					</div>
+				`).join("") : '<p class="info-note">This clue is not linked to a map item yet.</p>'}
+			</div>
+		`);
+		selectors.featureForm.addClass("hidden");
+		renderModalActions([
+			{
+				label: "View Overlay",
+				icon: "fa-solid fa-table-cells",
+				variant: "primary",
+				onClick: function () {
+					viewClueOnReasoningOverlay(clue.id);
+				},
+			},
+			{
+				label: "Edit Clue",
+				icon: "fa-solid fa-pen",
+				variant: "cancel",
+				onClick: function () {
+					openClueModal(clue);
+				},
+			},
+		]);
+		openInfoModal();
+	}
+
+	function viewClueOnReasoningOverlay(clueId) {
+		state.reasoningOverlayEnabled = true;
+		selectors.toggleReasoningOverlay.prop("checked", true);
+		scheduleReasoningOverlayUpdate(null, "Finding clue influence", function () {
+			const matchingCell = state.reasoningCells
+				.filter((cell) => cell.contributions.some((contribution) => Number(contribution.clueId) === Number(clueId)))
+				.sort((a, b) => b.rank - a.rank)[0];
+			if (matchingCell) {
+				showReasoningCellDetails(matchingCell.id);
+				state.map.fitBounds(turf.bbox(matchingCell.feature), { padding: 120, duration: 650 });
+			} else {
+				showToast("This clue has no scored spatial influence yet.", true);
+			}
+			saveMapState();
+		});
+	}
+
 	function openFeatureEditor(feature) {
 		clearTemporaryClickMarker();
 		const safeFeature = {
@@ -1113,6 +1778,9 @@
 			name: feature.name || "",
 			description: feature.description || "",
 			color: feature.color || "#ff6b35",
+			category: feature.category || "reference",
+			status: feature.status || "active",
+			confidence: Number.isFinite(Number(feature.confidence)) ? Number(feature.confidence) : 50,
 			geometry: feature.geometry,
 			metadata: $.extend(true, {}, feature.metadata || {}),
 		};
@@ -1120,10 +1788,12 @@
 		const type = safeFeature.type;
 		$("#feature-id").val(safeFeature.id ? String(safeFeature.id) : "");
 		$("#feature-type").val(type);
-		$("#feature-type-label").val(type.charAt(0).toUpperCase() + type.slice(1));
 		$("#feature-name").val(safeFeature.name);
 		$("#feature-description").val(safeFeature.description);
 		$("#feature-color").val(safeFeature.color);
+		$("#feature-category").val(safeFeature.category);
+		$("#feature-status").val(safeFeature.status);
+		$("#feature-confidence").val(String(safeFeature.confidence));
 
 		if (type === "marker") {
 			$("#feature-lat").val(safeFeature.geometry.coordinates[1]);
@@ -1189,13 +1859,20 @@
 
 	function currentFeaturePayload() {
 		const type = $("#feature-type").val();
+		const confidenceRaw = Number($("#feature-confidence").val());
+		const confidence = window.Elevated && window.Elevated.utils
+			? window.Elevated.utils.clamp(confidenceRaw, 0, 100)
+			: Math.max(0, Math.min(100, Number.isFinite(confidenceRaw) ? confidenceRaw : 50));
 		const base = {
 			id: $("#feature-id").val() ? Number($("#feature-id").val()) : null,
 			hunt_id: state.activeHuntId,
 			type,
+			category: $("#feature-category").val(),
 			name: $("#feature-name").val().trim(),
 			description: $("#feature-description").val().trim(),
 			color: $("#feature-color").val(),
+			status: $("#feature-status").val(),
+			confidence,
 			geometry: null,
 			metadata: {},
 		};
@@ -1219,7 +1896,7 @@
 			}
 		}
 
-		if (type === "polygon") {
+		if (type === "polygon" || type === "line") {
 			if (state.draw && state.pendingDrawFeatureId) {
 				const drawFeature = state.draw.get(state.pendingDrawFeatureId);
 				if (drawFeature) {
@@ -1251,6 +1928,407 @@
 				features: buildFeatureAnnotationFeatures(),
 			});
 		}
+		updateReasoningOverlay();
+	}
+
+	function currentReasoningSettings() {
+		return $.extend(true, {}, REASONING_DEFAULT_SETTINGS, state.reasoningSettings || {});
+	}
+
+	function safeIntersect(featureA, featureB) {
+		try {
+			if (typeof turf.featureCollection === "function") {
+				const result = turf.intersect(turf.featureCollection([featureA, featureB]));
+				if (result) {
+					return result;
+				}
+			}
+		} catch (error) {
+			// Turf versions differ on intersect signature.
+		}
+
+		try {
+			return turf.intersect(featureA, featureB);
+		} catch (error) {
+			return null;
+		}
+	}
+
+	function spatialInfluence(cellCenter, mapItem) {
+		const geometry = featureDisplayGeometry(mapItem);
+		const point = turf.point(cellCenter);
+
+		if (geometry.type === "Point") {
+			const distanceKm = turf.distance(point, turf.point(geometry.coordinates), { units: "kilometers" });
+			return Math.exp(-distanceKm / 25);
+		}
+
+		if (geometry.type === "Polygon" || geometry.type === "MultiPolygon") {
+			const polygon = { type: "Feature", geometry, properties: {} };
+			if (turf.booleanPointInPolygon(point, polygon)) {
+				return 1;
+			}
+			const boundary = turf.polygonToLine(polygon);
+			const distanceKm = turf.pointToLineDistance(point, boundary, { units: "kilometers" });
+			return Math.exp(-distanceKm / 20);
+		}
+
+		if (geometry.type === "LineString") {
+			const line = { type: "Feature", geometry, properties: {} };
+			const distanceKm = turf.pointToLineDistance(point, line, { units: "kilometers" });
+			return Math.exp(-distanceKm / 15);
+		}
+
+		return 0;
+	}
+
+	function clueRelationshipCategory(mapItem, relationshipType) {
+		if (relationshipType === "contradicts") {
+			return "negative";
+		}
+		if (mapItem.category === "search_area" || mapItem.category === "route") {
+			return "terrain";
+		}
+		return "text";
+	}
+
+	function buildReasoningEvidenceItems() {
+		const cluesById = new Map();
+		const mapItemsById = new Map();
+
+		state.clues
+			.filter((clue) => Number(clue.hunt_id) === Number(state.activeHuntId))
+			.forEach((clue) => cluesById.set(Number(clue.id), clue));
+
+		state.features
+			.filter((feature) => Number(feature.hunt_id) === Number(state.activeHuntId))
+			.forEach((feature) => mapItemsById.set(Number(feature.id), feature));
+
+		return state.clueMapItems.map((link) => {
+			const clue = cluesById.get(Number(link.clue_id));
+			const mapItem = mapItemsById.get(Number(link.map_item_id));
+			if (!clue || !mapItem) {
+				return null;
+			}
+
+			const relationshipType = link.relationship_type || "supports";
+			return {
+				clue,
+				mapItem,
+				relationshipType,
+				baseBoost: REASONING_BASE_BOOSTS[relationshipType] || REASONING_BASE_BOOSTS.supports,
+				confidence: Math.max(0, Math.min(1, Number(clue.confidence || 50) / 100)),
+				category: clueRelationshipCategory(mapItem, relationshipType),
+			};
+		}).filter(Boolean);
+	}
+
+	function estimateReasoningHexCount(bbox, cellSideKm) {
+		const bboxAreaKm2 = turf.area(turf.bboxPolygon(bbox)) / 1000000;
+		const hexAreaKm2 = (3 * Math.sqrt(3) / 2) * Math.pow(Math.max(cellSideKm, 0.1), 2);
+		if (!Number.isFinite(bboxAreaKm2) || !Number.isFinite(hexAreaKm2) || hexAreaKm2 <= 0) {
+			return Number.POSITIVE_INFINITY;
+		}
+		return Math.ceil(bboxAreaKm2 / hexAreaKm2);
+	}
+
+	function scoreReasoningCell(hexFeature, priorChance, index, evidenceItems) {
+		const settings = currentReasoningSettings();
+		const center = turf.center(hexFeature).geometry.coordinates;
+		const startingOdds = priorChance > 0 && priorChance < 1 ? priorChance / (1 - priorChance) : 0;
+		const categoryProducts = { text: 1, terrain: 1, negative: 1 };
+		const categoryCounts = { text: 0, terrain: 0, negative: 0 };
+		const contributions = [];
+
+		evidenceItems.forEach((evidence) => {
+			const influence = spatialInfluence(center, evidence.mapItem);
+			if (influence < 0.02) {
+				return;
+			}
+
+			const effectiveBoost = 1 + (evidence.baseBoost - 1) * evidence.confidence * influence;
+			const category = evidence.category;
+			categoryCounts[category] += 1;
+			const repeatedBoost = effectiveBoost * Math.pow(settings.repeat_decay, Math.max(0, categoryCounts[category] - 1));
+			categoryProducts[category] *= repeatedBoost;
+			contributions.push({
+				clueId: evidence.clue.id,
+				mapItemId: evidence.mapItem.id,
+				clueTitle: evidence.clue.title,
+				mapItemName: evidence.mapItem.name,
+				relationshipType: evidence.relationshipType,
+				category,
+				boost: repeatedBoost,
+				influence,
+			});
+		});
+
+		const cappedCategories = {};
+		Object.keys(categoryProducts).forEach((category) => {
+			if (category === "negative") {
+				cappedCategories[category] = Math.max(categoryProducts[category], settings.negative_floor);
+				return;
+			}
+			const cap = Number(settings.category_caps && settings.category_caps[category]) || 8;
+			cappedCategories[category] = Math.min(categoryProducts[category], cap);
+		});
+
+		const categoryMultiplier = Object.values(cappedCategories).reduce((product, value) => product * value, 1);
+		const finalOdds = startingOdds * categoryMultiplier;
+		const finalChance = finalOdds / (1 + finalOdds);
+		const logOdds = finalOdds > 0 ? Math.log(finalOdds) : Number.NEGATIVE_INFINITY;
+
+		return {
+			id: `hex-${index}`,
+			feature: hexFeature,
+			priorChance,
+			finalChance,
+			logOdds,
+			categoryMultipliers: cappedCategories,
+			contributions: contributions.sort((a, b) => Math.abs(b.boost - 1) - Math.abs(a.boost - 1)).slice(0, 8),
+		};
+	}
+
+	function buildReasoningCells() {
+		const hunt = currentHunt();
+		state.reasoningOverlayWarning = "";
+		if (!hunt || !hunt.search_area) {
+			return [];
+		}
+
+		const settings = currentReasoningSettings();
+		const searchFeature = { type: "Feature", geometry: hunt.search_area, properties: {} };
+		const bbox = turf.bbox(searchFeature);
+		const estimatedCells = estimateReasoningHexCount(bbox, settings.cell_side_km);
+		if (estimatedCells > REASONING_MAX_HEX_CANDIDATES) {
+			state.reasoningOverlayWarning = `Cell size too small: ${estimatedCells.toLocaleString()} cells`;
+			showToast(`Reasoning overlay would generate about ${estimatedCells.toLocaleString()} cells. Increase cell size to keep the map responsive.`, true);
+			return [];
+		}
+
+		const grid = turf.hexGrid(bbox, settings.cell_side_km, { units: "kilometers" });
+		const candidates = (grid.features || []).map((hexFeature, index) => {
+			const intersection = safeIntersect(hexFeature, searchFeature);
+			if (!intersection) {
+				return null;
+			}
+			const cellArea = turf.area(hexFeature);
+			const insideArea = turf.area(intersection);
+			const inBoundsFraction = cellArea > 0 ? Math.max(0, Math.min(1, insideArea / cellArea)) : 0;
+			if (inBoundsFraction <= 0) {
+				return null;
+			}
+			return { hexFeature, inBoundsFraction, index };
+		}).filter(Boolean);
+
+		const totalFraction = candidates.reduce((sum, cell) => sum + cell.inBoundsFraction, 0);
+		if (totalFraction <= 0) {
+			return [];
+		}
+
+		const evidenceItems = buildReasoningEvidenceItems();
+		const scoredCells = candidates.map((cell, index) => scoreReasoningCell(cell.hexFeature, cell.inBoundsFraction / totalFraction, index, evidenceItems));
+		const finiteScores = scoredCells.map((cell) => cell.finalChance).filter(Number.isFinite);
+		const minScore = Math.min(...finiteScores);
+		const maxScore = Math.max(...finiteScores);
+
+		scoredCells.forEach((cell) => {
+			const range = maxScore - minScore;
+			const rank = range > 0 ? (cell.finalChance - minScore) / range : 0.5;
+			cell.rank = rank;
+			cell.feature.properties = {
+				cellId: cell.id,
+				rank,
+				priorChance: cell.priorChance,
+				finalChance: cell.finalChance,
+				logOdds: Number.isFinite(cell.logOdds) ? cell.logOdds : -999,
+				selected: false,
+			};
+		});
+
+		return scoredCells;
+	}
+
+	function updateReasoningSummary(message) {
+		selectors.reasoningSummary.text(message);
+	}
+
+	function syncReasoningSettingsForm() {
+		const settings = currentReasoningSettings();
+		$("#reasoning-cell-side").val(settings.cell_side_km);
+		$("#reasoning-repeat-decay").val(settings.repeat_decay);
+		$("#reasoning-category-cap").val(settings.category_caps.text);
+		$("#reasoning-negative-floor").val(settings.negative_floor);
+	}
+
+	function loadReasoningSettings() {
+		if (!state.activeHuntId) {
+			state.reasoningSettings = $.extend(true, {}, REASONING_DEFAULT_SETTINGS);
+			syncReasoningSettingsForm();
+			updateReasoningOverlay();
+			return $.Deferred().resolve(state.reasoningSettings).promise();
+		}
+
+		return apiRequest("GET", "reasoning-settings", null, { hunt_id: state.activeHuntId })
+			.then(function (settings) {
+				state.reasoningSettings = $.extend(true, {}, REASONING_DEFAULT_SETTINGS, settings || {});
+				syncReasoningSettingsForm();
+				updateReasoningOverlay();
+				return state.reasoningSettings;
+			})
+			.catch(function () {
+				state.reasoningSettings = $.extend(true, {}, REASONING_DEFAULT_SETTINGS);
+				syncReasoningSettingsForm();
+				updateReasoningOverlay();
+				return state.reasoningSettings;
+			});
+	}
+
+	function saveReasoningSettings(event) {
+		event.preventDefault();
+		if (!ensureActiveHunt()) {
+			return;
+		}
+
+		const categoryCap = Number($("#reasoning-category-cap").val());
+		const payload = {
+			cell_side_km: Number($("#reasoning-cell-side").val()),
+			repeat_decay: Number($("#reasoning-repeat-decay").val()),
+			category_caps: {
+				text: categoryCap,
+				terrain: categoryCap,
+				negative: Number($("#reasoning-negative-floor").val()),
+			},
+			negative_floor: Number($("#reasoning-negative-floor").val()),
+		};
+
+		setBusyStatus("Saving reasoning settings");
+		apiRequest("PATCH", "reasoning-settings", payload, { hunt_id: state.activeHuntId })
+			.then(function (settings) {
+				state.reasoningSettings = $.extend(true, {}, REASONING_DEFAULT_SETTINGS, settings || {});
+				syncReasoningSettingsForm();
+				scheduleReasoningOverlayUpdate(null, "Recalculating reasoning overlay");
+				showToast("Reasoning settings updated.");
+			})
+			.catch(function (error) {
+				clearBusyStatus("Save failed");
+				handleAjaxError(error);
+			});
+	}
+
+	function resetReasoningSettings() {
+		state.reasoningSettings = $.extend(true, {}, REASONING_DEFAULT_SETTINGS);
+		syncReasoningSettingsForm();
+		if (!state.activeHuntId) {
+			updateReasoningOverlay();
+			return;
+		}
+		setBusyStatus("Resetting reasoning settings");
+		apiRequest("PATCH", "reasoning-settings", state.reasoningSettings, { hunt_id: state.activeHuntId })
+			.then(function (settings) {
+				state.reasoningSettings = $.extend(true, {}, REASONING_DEFAULT_SETTINGS, settings || {});
+				syncReasoningSettingsForm();
+				scheduleReasoningOverlayUpdate(null, "Recalculating reasoning overlay");
+				showToast("Reasoning settings reset.");
+			})
+			.catch(function (error) {
+				clearBusyStatus("Reset failed");
+				handleAjaxError(error);
+			});
+	}
+
+	function updateReasoningOverlay(selectedCellId) {
+		if (!state.mapLoaded || !state.map || !state.map.getSource("reasoning-hexes")) {
+			return;
+		}
+
+		if (!state.reasoningOverlayEnabled) {
+			state.reasoningOverlayWarning = "";
+			state.reasoningCells = [];
+			state.reasoningCellsById = {};
+			state.map.getSource("reasoning-hexes").setData({ type: "FeatureCollection", features: [] });
+			applyReasoningOverlayVisibility();
+			updateReasoningSummary("Off");
+			return;
+		}
+
+		const hunt = currentHunt();
+		if (!hunt || !hunt.search_area) {
+			state.reasoningOverlayWarning = "";
+			state.reasoningCells = [];
+			state.reasoningCellsById = {};
+			state.map.getSource("reasoning-hexes").setData({ type: "FeatureCollection", features: [] });
+			applyReasoningOverlayVisibility();
+			updateReasoningSummary("Search area required");
+			setStatus("Search area required");
+			showToast("Draw a hunt search area before using the reasoning overlay.", true);
+			return;
+		}
+
+		state.reasoningCells = buildReasoningCells();
+		state.reasoningCellsById = {};
+		const features = state.reasoningCells.map((cell) => {
+			state.reasoningCellsById[cell.id] = cell;
+			cell.feature.properties.selected = selectedCellId === cell.id;
+			return cell.feature;
+		});
+		state.map.getSource("reasoning-hexes").setData({ type: "FeatureCollection", features });
+		applyReasoningOverlayVisibility();
+		updateReasoningSummary(state.reasoningOverlayWarning || `${features.length} cells`);
+		if (state.reasoningOverlayWarning) {
+			setStatus(state.reasoningOverlayWarning);
+		}
+	}
+
+	function reasoningOverlayStatusMessage() {
+		if (!state.reasoningOverlayEnabled) {
+			return "Ready";
+		}
+
+		const hunt = currentHunt();
+		if (!hunt || !hunt.search_area) {
+			return "Search area required";
+		}
+
+		if (state.reasoningOverlayWarning) {
+			return state.reasoningOverlayWarning;
+		}
+
+		return `${state.reasoningCells.length} reasoning cells ready`;
+	}
+
+	function scheduleReasoningOverlayUpdate(selectedCellId, message, onComplete) {
+		window.clearTimeout(state.reasoningOverlayTimer);
+		const requestId = state.reasoningOverlayRequestId + 1;
+		state.reasoningOverlayRequestId = requestId;
+
+		if (!state.reasoningOverlayEnabled) {
+			updateReasoningOverlay(selectedCellId);
+			clearBusyStatus("Ready");
+			if (typeof onComplete === "function") {
+				onComplete();
+			}
+			return;
+		}
+
+		setBusyStatus(message || "Calculating reasoning overlay");
+		state.reasoningOverlayTimer = window.setTimeout(function () {
+			if (requestId !== state.reasoningOverlayRequestId) {
+				return;
+			}
+
+			try {
+				updateReasoningOverlay(selectedCellId);
+				clearBusyStatus(reasoningOverlayStatusMessage());
+				if (typeof onComplete === "function") {
+					onComplete();
+				}
+			} catch (error) {
+				clearBusyStatus("Reasoning overlay failed");
+				showToast("Reasoning overlay failed to calculate.", true);
+				throw error;
+			}
+		}, 30);
 	}
 
 	function buildFeatureAnnotationFeatures() {
@@ -1280,6 +2358,11 @@
 			data: { type: "FeatureCollection", features: [] },
 		});
 
+		state.map.addSource("hunt-search-area", {
+			type: "geojson",
+			data: { type: "FeatureCollection", features: [] },
+		});
+
 		state.map.addSource("grid-lines", {
 			type: "geojson",
 			data: { type: "FeatureCollection", features: [] },
@@ -1300,6 +2383,16 @@
 			data: { type: "FeatureCollection", features: [] },
 		});
 
+		state.map.addSource("bearing-angle", {
+			type: "geojson",
+			data: { type: "FeatureCollection", features: [] },
+		});
+
+		state.map.addSource("bearing-labels", {
+			type: "geojson",
+			data: { type: "FeatureCollection", features: [] },
+		});
+
 		state.map.addSource("circle-preview", {
 			type: "geojson",
 			data: { type: "FeatureCollection", features: [] },
@@ -1311,6 +2404,11 @@
 		});
 
 		state.map.addSource("feature-annotations", {
+			type: "geojson",
+			data: { type: "FeatureCollection", features: [] },
+		});
+
+		state.map.addSource("reasoning-hexes", {
 			type: "geojson",
 			data: { type: "FeatureCollection", features: [] },
 		});
@@ -1334,6 +2432,44 @@
 			paint: {
 				"line-color": ["get", "color"],
 				"line-width": 2,
+			},
+		});
+
+		state.map.addLayer({
+			id: "hunt-lines",
+			type: "line",
+			source: "hunt-features",
+			filter: ["==", ["geometry-type"], "LineString"],
+			paint: {
+				"line-color": ["get", "color"],
+				"line-width": 3,
+			},
+		});
+
+		state.map.addLayer({
+			id: "hunt-search-area-fill",
+			type: "fill",
+			source: "hunt-search-area",
+			paint: {
+				"fill-color": "#9be5c7",
+				"fill-opacity": 0.08,
+			},
+			layout: {
+				visibility: "none",
+			},
+		});
+
+		state.map.addLayer({
+			id: "hunt-search-area-line",
+			type: "line",
+			source: "hunt-search-area",
+			paint: {
+				"line-color": "#9be5c7",
+				"line-width": 2,
+				"line-dasharray": [2, 1.2],
+			},
+			layout: {
+				visibility: "none",
 			},
 		});
 
@@ -1432,6 +2568,88 @@
 				"text-color": "#f7fff9",
 				"text-halo-color": "#0a0e10",
 				"text-halo-width": 1.4,
+			},
+		});
+
+		state.map.addLayer({
+			id: "reasoning-hexes-fill",
+			type: "fill",
+			source: "reasoning-hexes",
+			paint: {
+				"fill-color": [
+					"interpolate",
+					["linear"],
+					["get", "rank"],
+					0, "#1b1d22",
+					0.35, "#39556d",
+					0.65, "#c4943f",
+					1, "#d03740",
+				],
+				"fill-opacity": ["case", ["boolean", ["get", "selected"], false], 0.82, 0.54],
+			},
+			layout: { visibility: "none" },
+		});
+
+		state.map.addLayer({
+			id: "reasoning-hexes-line",
+			type: "line",
+			source: "reasoning-hexes",
+			paint: {
+				"line-color": ["case", ["boolean", ["get", "selected"], false], "#ffffff", "rgba(255,255,255,0.34)"],
+				"line-width": ["case", ["boolean", ["get", "selected"], false], 2.4, 0.8],
+			},
+			layout: { visibility: "none" },
+		});
+
+		state.map.on("click", "reasoning-hexes-fill", function (event) {
+			if (!state.reasoningOverlayEnabled || !event.features.length) {
+				return;
+			}
+			const cellId = event.features[0].properties ? event.features[0].properties.cellId : null;
+			if (cellId) {
+				showReasoningCellDetails(String(cellId));
+			}
+		});
+
+		state.map.addLayer({
+			id: "bearing-angle-line",
+			type: "line",
+			source: "bearing-angle",
+			filter: ["==", ["geometry-type"], "LineString"],
+			paint: {
+				"line-color": "#d03740",
+				"line-width": 3,
+				"line-dasharray": [1.2, 0.8],
+			},
+		});
+
+		state.map.addLayer({
+			id: "bearing-angle-points",
+			type: "circle",
+			source: "bearing-angle",
+			filter: ["==", ["geometry-type"], "Point"],
+			paint: {
+				"circle-radius": 5,
+				"circle-color": "#d03740",
+				"circle-stroke-color": "#ffffff",
+				"circle-stroke-width": 1,
+			},
+		});
+
+		state.map.addLayer({
+			id: "bearing-angle-labels-layer",
+			type: "symbol",
+			source: "bearing-labels",
+			layout: {
+				"text-field": ["get", "label"],
+				"text-size": 11,
+				"text-font": ["Open Sans Bold"],
+				"text-anchor": "center",
+			},
+			paint: {
+				"text-color": "#ffffff",
+				"text-halo-color": "#08090b",
+				"text-halo-width": 1.6,
 			},
 		});
 
@@ -1678,6 +2896,25 @@
 		});
 	}
 
+	function ensureTerrainDemSource() {
+		if (state.map.getSource("mapbox-dem")) {
+			return true;
+		}
+
+		try {
+			state.map.addSource("mapbox-dem", {
+				type: "raster-dem",
+				url: "mapbox://mapbox.mapbox-terrain-dem-v1",
+				tileSize: 512,
+				maxzoom: 14,
+			});
+			return true;
+		} catch (error) {
+			showToast("3D terrain source could not be added.", true);
+			return false;
+		}
+	}
+
 	function applyTerrainState(options) {
 		if (!state.map || !state.mapLoaded) {
 			return;
@@ -1686,14 +2923,31 @@
 		const terrainEnabled = selectors.toggleTerrain.is(":checked");
 		state.preferences.terrain3d = terrainEnabled;
 		if (terrainEnabled) {
-			state.map.setTerrain({ source: "mapbox-dem", exaggeration: 1.1 });
-			if (options && options.reveal && state.map.getPitch() < 35) {
-				state.map.easeTo({ pitch: 55, duration: 700 });
+			if (!ensureTerrainDemSource()) {
+				selectors.toggleTerrain.prop("checked", false);
+				state.preferences.terrain3d = false;
+				return;
 			}
+			try {
+				if (typeof state.map.setProjection === "function") {
+					state.map.setProjection("mercator");
+				}
+				state.map.setTerrain({ source: "mapbox-dem", exaggeration: 1.35 });
+			} catch (error) {
+				showToast("3D terrain is unavailable for the current map style.", true);
+				selectors.toggleTerrain.prop("checked", false);
+				state.preferences.terrain3d = false;
+				return;
+			}
+			if (options && options.reveal && state.map.getPitch() < 35) {
+				state.map.easeTo({ pitch: 58, bearing: state.map.getBearing(), duration: 700 });
+			}
+			setStatus("3D terrain enabled");
 			return;
 		}
 
 		state.map.setTerrain(null);
+		setStatus("3D terrain disabled");
 	}
 
 	function applyRoadVisibility() {
@@ -1888,6 +3142,109 @@
 		}
 	}
 
+	function bearingLabelFeatures() {
+		if (state.bearingCoords.length < 2) {
+			return [];
+		}
+
+		const origin = state.bearingCoords[0];
+		const target = state.bearingCoords[1];
+		const midpoint = turf.midpoint(turf.point(origin), turf.point(target)).geometry.coordinates;
+		const absoluteBearing = normalizedDegrees(turf.bearing(turf.point(origin), turf.point(target)));
+		const relativeBearing = normalizedDegrees(absoluteBearing - state.map.getBearing());
+		const distanceMeters = turf.distance(turf.point(origin), turf.point(target), { units: "kilometers" }) * 1000;
+		return [{
+			type: "Feature",
+			geometry: { type: "Point", coordinates: midpoint },
+			properties: {
+				label: `Abs ${formatDegrees(absoluteBearing)} | Rel ${formatDegrees(relativeBearing)} | ${formatDistance(distanceMeters)}`,
+			},
+		}];
+	}
+
+	function updateBearingLayer() {
+		if (!state.mapLoaded || !state.map.getSource("bearing-angle") || !state.map.getSource("bearing-labels")) {
+			return;
+		}
+
+		const features = state.bearingCoords.map((coord) => ({
+			type: "Feature",
+			geometry: { type: "Point", coordinates: coord },
+			properties: {},
+		}));
+
+		if (state.bearingCoords.length > 1) {
+			features.push({
+				type: "Feature",
+				geometry: { type: "LineString", coordinates: state.bearingCoords },
+				properties: {},
+			});
+		}
+
+		state.map.getSource("bearing-angle").setData({ type: "FeatureCollection", features });
+		state.map.getSource("bearing-labels").setData({ type: "FeatureCollection", features: bearingLabelFeatures() });
+		if (state.bearingCoords.length > 1) {
+			const origin = state.bearingCoords[0];
+			const target = state.bearingCoords[1];
+			const absoluteBearing = normalizedDegrees(turf.bearing(turf.point(origin), turf.point(target)));
+			const relativeBearing = normalizedDegrees(absoluteBearing - state.map.getBearing());
+			setStatus(`Bearing abs ${formatDegrees(absoluteBearing)} | rel ${formatDegrees(relativeBearing)}`);
+		} else if (state.mode === "bearing") {
+			setStatus(state.bearingCoords.length ? "Bearing origin set" : "Bearing");
+		}
+	}
+
+	function updateCompassBearing() {
+		if (!state.map || !selectors.mapCompassNeedle.length) {
+			return;
+		}
+		selectors.mapCompassNeedle.css("transform", `rotate(${-state.map.getBearing()}deg)`);
+	}
+
+	function resetNorthOrTilt() {
+		if (!state.map) {
+			return;
+		}
+		const bearing = Math.abs(state.map.getBearing());
+		const pitch = Math.abs(state.map.getPitch());
+		if (bearing > 1) {
+			state.map.easeTo({ bearing: 0, duration: 650 });
+			showToast("Map reset to north.");
+			return;
+		}
+		if (pitch > 1) {
+			state.map.easeTo({ pitch: 0, duration: 650 });
+			showToast("Map tilt reset.");
+			return;
+		}
+		state.map.easeTo({ bearing: 0, pitch: 0, duration: 650 });
+	}
+
+	function toggleReasoningBoardFullscreen() {
+		const boardShell = document.querySelector(".reasoning-board-shell");
+		if (!boardShell) {
+			return;
+		}
+		if (document.fullscreenElement === boardShell) {
+			document.exitFullscreen().catch(() => {
+				showToast("Unable to exit fullscreen.", true);
+			});
+			return;
+		}
+		boardShell.requestFullscreen().then(() => {
+			window.setTimeout(renderReasoningBoard, 120);
+		}).catch(() => {
+			showToast("Unable to open reasoning board fullscreen.", true);
+		});
+	}
+
+	function clearBearing() {
+		state.bearingCoords = [];
+		if (state.mapLoaded) {
+			updateBearingLayer();
+		}
+	}
+
 	function clearCirclePreview() {
 		if (state.mapLoaded && state.map.getSource("circle-preview")) {
 			state.map.getSource("circle-preview").setData({ type: "FeatureCollection", features: [] });
@@ -1989,8 +3346,8 @@
 		syncCircleInputs(center, radius);
 	}
 
-	function startPolygonEditing(feature) {
-		if (!state.draw || !feature.geometry || feature.geometry.type !== "Polygon") {
+	function startLinearGeometryEditing(feature) {
+		if (!state.draw || !feature.geometry || (feature.geometry.type !== "Polygon" && feature.geometry.type !== "LineString")) {
 			return;
 		}
 
@@ -2022,8 +3379,14 @@
 		}
 
 		if (feature.type === "polygon") {
-			startPolygonEditing(feature);
+			startLinearGeometryEditing(feature);
 			setStatus("Edit polygon");
+			return;
+		}
+
+		if (feature.type === "line") {
+			startLinearGeometryEditing(feature);
+			setStatus("Edit line");
 		}
 	}
 
@@ -2040,7 +3403,7 @@
 	function setMode(nextMode) {
 		state.mode = nextMode;
 		syncModeBadge();
-		if (nextMode !== "polygon") {
+		if (nextMode !== "polygon" && nextMode !== "hunt-area") {
 			clearPolygonEditing();
 		}
 
@@ -2049,9 +3412,9 @@
 		}
 
 		if (state.map) {
-			if (nextMode === "measure") {
+			if (nextMode === "measure" || nextMode === "bearing") {
 				state.map.doubleClickZoom.disable();
-				setStatus("Measure");
+				setStatus(nextMode === "measure" ? "Measure" : "Bearing");
 			} else {
 				state.map.doubleClickZoom.enable();
 			}
@@ -2066,16 +3429,43 @@
 		if (nextMode === "add-circle") {
 			setStatus("Place radius");
 		}
+		if (nextMode === "bearing") {
+			clearBearing();
+			setStatus("Bearing");
+		}
+		if (nextMode === "add-line") {
+			setStatus("Draw line");
+			if (state.draw) {
+				state.draw.changeMode("draw_line_string");
+			}
+		}
 		if (nextMode === "polygon") {
 			setStatus("Draw polygon");
-			state.draw.changeMode("draw_polygon");
+			if (state.draw) {
+				state.draw.changeMode("draw_polygon");
+			}
+		}
+		if (nextMode === "hunt-area") {
+			setStatus("Draw hunt area");
+			if (state.draw) {
+				state.draw.changeMode("draw_polygon");
+			}
 		}
 	}
 
 	function handleMapClick(event) {
+		if (state.ignoreNextMapClick) {
+			state.ignoreNextMapClick = false;
+			return;
+		}
+
+		if (state.mode === "polygon" || state.mode === "hunt-area" || state.mode === "add-line") {
+			return;
+		}
+
 		if (state.mode === "browse" && state.mapLoaded) {
 			const rendered = state.map.queryRenderedFeatures(event.point, {
-				layers: ["hunt-markers-circle", "hunt-polygons-fill", "hunt-polygons-line"],
+				layers: ["hunt-markers-circle", "hunt-polygons-fill", "hunt-polygons-line", "hunt-lines"],
 			});
 			if (rendered.length) {
 				const featureId = rendered[0].properties ? Number(rendered[0].properties.featureId) : null;
@@ -2132,6 +3522,17 @@
 			return;
 		}
 
+		if (state.mode === "bearing") {
+			const nextCoord = [event.lngLat.lng, event.lngLat.lat];
+			if (state.bearingCoords.length >= 2) {
+				state.bearingCoords = [nextCoord];
+			} else {
+				state.bearingCoords.push(nextCoord);
+			}
+			updateBearingLayer();
+			return;
+		}
+
 		showLocationDetails(event.lngLat, queryPublicLandFeatures(event.point));
 	}
 
@@ -2140,15 +3541,36 @@
 
 		state.map.on("moveend", function () {
 			updateGridOverlay();
+			updateBearingLayer();
+			updateCompassBearing();
 			saveMapState();
 		});
 
 		state.map.on("zoomend", updateGridOverlay);
-		state.map.on("rotateend", saveMapState);
+		state.map.on("rotate", updateCompassBearing);
+		state.map.on("rotateend", function () {
+			updateCompassBearing();
+			updateBearingLayer();
+			saveMapState();
+		});
 		state.map.on("pitchend", saveMapState);
 
 		state.map.on("draw.create", function (event) {
-			if (state.mode !== "polygon") {
+			if (state.mode === "hunt-area") {
+				state.pendingHuntAreaDrawId = event.features[0].id;
+				if (!state.huntDraft) {
+					state.huntDraft = { id: null, name: "", description: "", search_area: null };
+				}
+				state.huntDraft.search_area = event.features[0].geometry;
+				syncHuntAreaSummary();
+				state.ignoreNextMapClick = true;
+				setMode("browse");
+				openHuntModal(null);
+				showToast("Search area captured.");
+				return;
+			}
+
+			if (state.mode !== "polygon" && state.mode !== "add-line") {
 				return;
 			}
 			if (!ensureActiveHunt()) {
@@ -2156,8 +3578,9 @@
 				return;
 			}
 			state.pendingDrawFeatureId = event.features[0].id;
+			state.ignoreNextMapClick = true;
 			openFeatureEditor({
-				type: "polygon",
+				type: state.mode === "add-line" ? "line" : "polygon",
 				name: "",
 				description: "",
 				color: "#ff6b35",
@@ -2167,6 +3590,15 @@
 		});
 
 		state.map.on("draw.update", function () {
+			if (state.mode === "hunt-area" && state.pendingHuntAreaDrawId && state.huntDraft) {
+				const drawFeature = state.draw.get(state.pendingHuntAreaDrawId);
+				if (drawFeature) {
+					state.huntDraft.search_area = drawFeature.geometry;
+					syncHuntAreaSummary();
+				}
+				return;
+			}
+
 			if (!state.pendingDrawFeatureId || !state.pendingFeature) {
 				return;
 			}
@@ -2179,14 +3611,7 @@
 
 	function handleStyleReady() {
 		state.mapLoaded = true;
-		if (!state.map.getSource("mapbox-dem")) {
-			state.map.addSource("mapbox-dem", {
-				type: "raster-dem",
-				url: "mapbox://mapbox.mapbox-terrain-dem-v1",
-				tileSize: 512,
-				maxzoom: 14,
-			});
-		}
+		ensureTerrainDemSource();
 		applyTerrainState({ reveal: false });
 		if (!state.map.getSource("hunt-features")) {
 			addMapSourcesAndLayers();
@@ -2200,12 +3625,14 @@
 		applyPublicLandOpacity();
 		applyParkAndBorderVisibility();
 		applyPeakLabelVisibility();
+		setStatus("Ready");
 		updateGridOverlay();
 		updateMeasurementLayer();
+		updateBearingLayer();
 		updateMapSource();
+		updateHuntAreaSource();
 		renderFeatures();
 		updateCirclePreviewFromInputs();
-		setStatus("Ready");
 	}
 
 	function initializeMap(config, mapState) {
@@ -2251,6 +3678,15 @@
 					},
 				},
 				{
+					id: "gl-draw-line",
+					type: "line",
+					filter: ["all", ["==", "$type", "LineString"]],
+					paint: {
+						"line-color": "#ff6b35",
+						"line-width": 3,
+					},
+				},
+				{
 					id: "gl-draw-polygon-and-line-vertex-halo-active",
 					type: "circle",
 					filter: ["all", ["==", "meta", "vertex"]],
@@ -2274,12 +3710,15 @@
 		state.map.addControl(state.draw, "top-left");
 		bindMapEvents();
 		state.map.on("style.load", handleStyleReady);
+		updateCompassBearing();
 	}
 
 	function populateFromBootstrap(data) {
 		state.config = data.config;
 		state.hunts = data.hunts || [];
-		state.features = data.features || [];
+		state.features = data.mapItems || data.features || [];
+		state.clues = data.clues || [];
+		state.clueMapItems = data.clueMapItems || [];
 		state.preferences.mapStyle = normalizeMapStyle(data.mapState && data.mapState.mapStyle ? data.mapState.mapStyle : data.config.mapStyle);
 		state.preferences.units = normalizeUnits(data.mapState && data.mapState.units ? data.mapState.units : "metric");
 		state.preferences.terrain3d = data.mapState ? data.mapState.terrain3d !== false : true;
@@ -2297,9 +3736,15 @@
 		selectors.toggleParksBorders.prop("checked", data.mapState ? data.mapState.parkBoundariesVisible !== false : true);
 		selectors.toggleGrid.prop("checked", data.mapState ? data.mapState.gridVisible !== false : true);
 		selectors.toggleCoords.prop("checked", data.mapState ? data.mapState.coordsVisible !== false : true);
+		selectors.toggleHuntAreas.prop("checked", data.mapState ? data.mapState.huntAreaVisible === true : false);
+		state.reasoningOverlayEnabled = data.mapState ? data.mapState.reasoningOverlayVisible === true : false;
+		selectors.toggleReasoningOverlay.prop("checked", state.reasoningOverlayEnabled);
 
 		renderHunts();
 		renderFeatures();
+		renderClues();
+		renderClueMapItemOptions();
+		loadReasoningSettings();
 		initializeMap(data.config, data.mapState || {});
 	}
 
@@ -2315,14 +3760,17 @@
 
 	function createOrUpdateHunt(event) {
 		event.preventDefault();
+		syncHuntDraftFromForm();
 		const payload = {
 			name: $("#hunt-name").val().trim(),
 			description: $("#hunt-description").val().trim(),
+			search_area: state.huntDraft && state.huntDraft.search_area ? state.huntDraft.search_area : null,
 		};
 		const huntId = Number($("#hunt-id").val() || 0);
 		const method = huntId ? "PATCH" : "POST";
 		const query = huntId ? { id: huntId } : null;
 
+		setBusyStatus(huntId ? "Saving hunt" : "Creating hunt");
 		apiRequest(method, "hunts", payload, query)
 			.then(function (hunt) {
 				const existingIndex = state.hunts.findIndex((item) => item.id === hunt.id);
@@ -2333,28 +3781,44 @@
 				}
 				setActiveHunt(hunt.id, true);
 				closeHuntModal();
+				clearBusyStatus("Hunt saved");
 				showToast(huntId ? "Hunt updated." : "Hunt created.");
 			})
-			.catch(handleAjaxError);
+			.catch(function (error) {
+				clearBusyStatus("Save failed");
+				handleAjaxError(error);
+			});
 	}
 
 	function deleteHunt(huntId) {
-		if (!window.confirm("Delete this hunt and all of its features?")) {
+		if (!window.confirm("Delete this hunt and all of its map items and clues?")) {
 			return;
 		}
 
+		setBusyStatus("Deleting hunt");
 		apiRequest("DELETE", "hunts", null, { id: huntId })
 			.then(function () {
 				state.hunts = state.hunts.filter((hunt) => hunt.id !== huntId);
 				state.features = state.features.filter((feature) => feature.hunt_id !== huntId);
+				state.clues = state.clues.filter((clue) => clue.hunt_id !== huntId);
+				state.clueMapItems = state.clueMapItems.filter((link) => {
+					const clue = state.clues.find((item) => Number(item.id) === Number(link.clue_id));
+					return Boolean(clue);
+				});
 				state.activeHuntId = state.hunts[0] ? state.hunts[0].id : null;
 				renderHunts();
 				renderFeatures();
+				renderClues();
+				renderClueMapItemOptions();
 				saveMapState();
 				closeInfoModal();
+				clearBusyStatus("Hunt deleted");
 				showToast("Hunt deleted.");
 			})
-			.catch(handleAjaxError);
+			.catch(function (error) {
+				clearBusyStatus("Delete failed");
+				handleAjaxError(error);
+			});
 	}
 
 	function saveFeature(event) {
@@ -2372,7 +3836,8 @@
 			return;
 		}
 
-		apiRequest(method, "features", payload, query)
+		setBusyStatus(payload.id ? "Saving map item" : "Creating map item");
+		apiRequest(method, "map-items", payload, query)
 			.then(function (feature) {
 				const existingIndex = state.features.findIndex((item) => item.id === feature.id);
 				if (existingIndex >= 0) {
@@ -2381,23 +3846,122 @@
 					state.features.unshift(feature);
 				}
 				renderFeatures();
+				renderClueMapItemOptions();
 				resetFeatureForm();
 				setMode("browse");
 				showFeatureDetails(feature);
-				showToast(payload.id ? "Feature updated." : "Feature saved.");
+				scheduleReasoningOverlayUpdate(null, "Recalculating reasoning overlay");
+				showToast(payload.id ? "Map item updated." : "Map item saved.");
 			})
-			.catch(handleAjaxError);
+			.catch(function (error) {
+				clearBusyStatus("Save failed");
+				handleAjaxError(error);
+			});
 	}
 
 	function deleteFeature(featureId) {
-		apiRequest("DELETE", "features", null, { id: featureId })
+		setBusyStatus("Deleting map item");
+		apiRequest("DELETE", "map-items", null, { id: featureId })
 			.then(function () {
 				state.features = state.features.filter((feature) => feature.id !== featureId);
+				state.clueMapItems = state.clueMapItems.filter((link) => Number(link.map_item_id) !== Number(featureId));
 				renderFeatures();
+				renderClues();
+				scheduleReasoningOverlayUpdate(null, "Recalculating reasoning overlay");
+				renderClueMapItemOptions();
 				closeInfoModal();
-				showToast("Feature deleted.");
+				showToast("Map item deleted.");
 			})
-			.catch(handleAjaxError);
+			.catch(function (error) {
+				clearBusyStatus("Delete failed");
+				handleAjaxError(error);
+			});
+	}
+
+	function syncClueLinks(clueId, selectedMapItemIds) {
+		const existing = state.clueMapItems.filter((link) => Number(link.clue_id) === Number(clueId));
+		const selectedSet = new Set(selectedMapItemIds.map((id) => Number(id)));
+		const existingSet = new Set(existing.map((link) => Number(link.map_item_id)));
+
+		const deletions = existing
+			.filter((link) => !selectedSet.has(Number(link.map_item_id)))
+			.map((link) => apiRequest("DELETE", "clue-map-items", null, { id: link.id }));
+
+		const creations = selectedMapItemIds
+			.filter((id) => !existingSet.has(Number(id)))
+			.map((id) => apiRequest("POST", "clue-map-items", {
+				clue_id: clueId,
+				map_item_id: Number(id),
+				relationship_type: "supports",
+			}));
+
+		return $.when.apply($, deletions.concat(creations));
+	}
+
+	function saveClue(event) {
+		event.preventDefault();
+		if (!ensureActiveHunt()) {
+			return;
+		}
+
+		const clueId = Number($("#clue-id").val() || 0);
+		const payload = {
+			hunt_id: state.activeHuntId,
+			title: $("#clue-title").val().trim(),
+			body: $("#clue-body").val().trim(),
+			interpretation: $("#clue-interpretation").val().trim(),
+			status: $("#clue-status").val(),
+			confidence: window.Elevated && window.Elevated.utils
+				? window.Elevated.utils.clamp($("#clue-confidence").val(), 0, 100)
+				: Math.max(0, Math.min(100, Number($("#clue-confidence").val()) || 50)),
+		};
+
+		const selectedMapItemIds = ($("#clue-map-items").val() || []).map((value) => Number(value));
+		const method = clueId ? "PATCH" : "POST";
+		const query = clueId ? { id: clueId } : null;
+
+		setBusyStatus(clueId ? "Saving clue" : "Creating clue");
+		apiRequest(method, "clues", payload, query)
+			.then(function (clue) {
+				return syncClueLinks(clue.id, selectedMapItemIds)
+					.then(function () {
+						return clue;
+					});
+			})
+			.then(function () {
+				return $.when(
+					apiRequest("GET", "clues", null, { hunt_id: state.activeHuntId }),
+					apiRequest("GET", "clue-map-items", null, { clue_id: "" })
+				);
+			})
+			.then(function (clues, clueMapItems) {
+				state.clues = clues;
+				state.clueMapItems = clueMapItems;
+				renderClues();
+				scheduleReasoningOverlayUpdate(null, "Recalculating reasoning overlay");
+				closeClueModal();
+				showToast(clueId ? "Clue updated." : "Clue created.");
+			})
+			.catch(function (error) {
+				clearBusyStatus("Save failed");
+				handleAjaxError(error);
+			});
+	}
+
+	function deleteClue(clueId) {
+		setBusyStatus("Deleting clue");
+		apiRequest("DELETE", "clues", null, { id: clueId })
+			.then(function () {
+				state.clues = state.clues.filter((clue) => Number(clue.id) !== Number(clueId));
+				state.clueMapItems = state.clueMapItems.filter((link) => Number(link.clue_id) !== Number(clueId));
+				renderClues();
+				scheduleReasoningOverlayUpdate(null, "Recalculating reasoning overlay");
+				showToast("Clue deleted.");
+			})
+			.catch(function (error) {
+				clearBusyStatus("Delete failed");
+				handleAjaxError(error);
+			});
 	}
 
 	function searchPlaces(query) {
@@ -2452,6 +4016,7 @@
 		$("#hunt-form").on("submit", createOrUpdateHunt);
 		$("#hunt-form-reset").on("click", closeHuntModal);
 		$("#feature-form").on("submit", saveFeature);
+		$("#clue-form").on("submit", saveClue);
 		$("#preferences-form").on("submit", savePreferences);
 		$("#feature-radius, #feature-lat, #feature-lng").on("input", updateCirclePreviewFromInputs);
 		$("#preference-public-opacity").on("input", function () {
@@ -2461,8 +4026,50 @@
 		$("#open-hunt-modal").on("click", function () {
 			openHuntModal(null);
 		});
+
+		$("#open-hunt-modal-quick").on("click", function () {
+			openHuntModal(null);
+		});
+		$("#open-clue-modal").on("click", function () {
+			if (!ensureActiveHunt()) {
+				return;
+			}
+			setWorkspacePanel("clues");
+			openClueModal(null);
+		});
+		$("#open-clue-modal-quick").on("click", function () {
+			if (!ensureActiveHunt()) {
+				return;
+			}
+			setWorkspacePanel("clues");
+			openClueModal(null);
+		});
+		$("#define-hunt-area").on("click", function () {
+			syncHuntDraftFromForm();
+			hideHuntModal();
+			clearPolygonEditing();
+			showToast("Click the map to draw the hunt search area, then double-click to finish.", true);
+			setMode("hunt-area");
+		});
+		$("#clear-hunt-area").on("click", function () {
+			if (state.huntDraft) {
+				state.huntDraft.search_area = null;
+			}
+			if (state.mode === "hunt-area") {
+				setMode("browse");
+			}
+			syncHuntAreaSummary();
+		});
 		$("#open-preferences-modal").on("click", openPreferencesModal);
+		$("#open-preferences-modal-quick").on("click", openPreferencesModal);
+		selectors.workspaceTabs.on("click", function () {
+			setWorkspacePanel($(this).data("workspace-tab"));
+		});
+		$("#fit-reasoning-board").on("click", function () {
+			toggleReasoningBoardFullscreen();
+		});
 		$("#close-hunt-modal, [data-close-hunt='true']").on("click", closeHuntModal);
+		$("#close-clue-modal, #clue-form-reset, [data-close-clue='true']").on("click", closeClueModal);
 		$("#close-preferences-modal, #preferences-form-reset, [data-close-preferences='true']").on("click", closePreferencesModal);
 		$("#close-info-modal").on("click", function () {
 			resetFeatureForm();
@@ -2481,6 +4088,12 @@
 		$('.tool-button[data-tool="measure"]').on("click", function () {
 			setMode(state.mode === "measure" ? "browse" : "measure");
 		});
+		$('.tool-button[data-tool="bearing"]').on("click", function () {
+			setMode(state.mode === "bearing" ? "browse" : "bearing");
+		});
+		$('.tool-button[data-tool="line"]').on("click", function () {
+			setMode(state.mode === "add-line" ? "browse" : "add-line");
+		});
 
 		$("#toggle-layer-panel").on("click", function () {
 			state.layerPanelOpen = !state.layerPanelOpen;
@@ -2489,26 +4102,18 @@
 
 		$("#clear-measurement").on("click", function () {
 			clearMeasurement();
-			showToast("Measurement cleared.");
+			clearBearing();
+			showToast("Temporary measurements cleared.");
 		});
 
-		$("#compass-reset").on("click", function () {
-			if (!state.map) {
-				return;
+		$("#map-compass").on("click", resetNorthOrTilt);
+		$(document).on("fullscreenchange", function () {
+			if (state.reasoningBoard) {
+				window.setTimeout(function () {
+					state.reasoningBoard.resize();
+					state.reasoningBoard.fit(undefined, 24);
+				}, 80);
 			}
-			const bearing = Math.abs(state.map.getBearing());
-			const pitch = Math.abs(state.map.getPitch());
-			if (bearing > 1) {
-				state.map.easeTo({ bearing: 0, duration: 650 });
-				showToast("Map reset to north.");
-				return;
-			}
-			if (pitch > 1) {
-				state.map.easeTo({ pitch: 0, duration: 650 });
-				showToast("Map tilt reset.");
-				return;
-			}
-			state.map.easeTo({ bearing: 0, pitch: 0, duration: 650 });
 		});
 
 		selectors.toggleRoads.on("change", function () {
@@ -2539,6 +4144,17 @@
 			updateGridOverlay();
 			saveMapState();
 		});
+		selectors.toggleHuntAreas.on("change", function () {
+			applyHuntAreaVisibility();
+			saveMapState();
+		});
+		selectors.toggleReasoningOverlay.on("change", function () {
+			state.reasoningOverlayEnabled = selectors.toggleReasoningOverlay.is(":checked");
+			scheduleReasoningOverlayUpdate(null, state.reasoningOverlayEnabled ? "Calculating reasoning overlay" : "Hiding reasoning overlay");
+			saveMapState();
+		});
+		$("#reasoning-settings-form").on("submit", saveReasoningSettings);
+		$("#reset-reasoning-settings").on("click", resetReasoningSettings);
 
 		$("#search-input").on("input", function () {
 			const query = $(this).val().trim();
@@ -2561,6 +4177,31 @@
 				selectors.layerPanel.addClass("hidden");
 			}
 		});
+		$(document).on("keydown", function (event) {
+			if (event.key !== "Escape") {
+				return;
+			}
+			if (!selectors.huntModal.hasClass("hidden")) {
+				closeHuntModal();
+				return;
+			}
+			if (!selectors.clueModal.hasClass("hidden")) {
+				closeClueModal();
+				return;
+			}
+			if (!selectors.preferencesModal.hasClass("hidden")) {
+				closePreferencesModal();
+				return;
+			}
+			if (!selectors.infoModal.hasClass("hidden")) {
+				closeInfoModal();
+				resetFeatureForm();
+				return;
+			}
+			state.layerPanelOpen = false;
+			selectors.layerPanel.addClass("hidden");
+			selectors.searchResults.addClass("hidden");
+		});
 
 		$("#toggle-sidebar").on("click", function () {
 			selectors.sidebar.addClass("collapsed");
@@ -2577,5 +4218,6 @@
 		syncModeBadge();
 		bindUi();
 		fetchBootstrap();
+		$("#search-input").attr("aria-label", "Search map locations");
 	});
 })(jQuery);
