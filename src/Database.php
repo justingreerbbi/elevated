@@ -81,6 +81,10 @@ final class Database
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hunt_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT \'other\',
+                source_title TEXT NOT NULL DEFAULT \'\',
+                source_url TEXT NOT NULL DEFAULT \'\',
+                source_date TEXT NOT NULL DEFAULT \'\',
                 body TEXT NOT NULL DEFAULT \'\',
                 interpretation TEXT NOT NULL DEFAULT \'\',
                 status TEXT NOT NULL DEFAULT \'open\',
@@ -90,6 +94,11 @@ final class Database
                 FOREIGN KEY (hunt_id) REFERENCES hunts(id) ON DELETE CASCADE
             )'
         );
+
+        self::ensureColumnExists($pdo, 'clues', 'source_type', "ALTER TABLE clues ADD COLUMN source_type TEXT NOT NULL DEFAULT 'other'");
+        self::ensureColumnExists($pdo, 'clues', 'source_title', "ALTER TABLE clues ADD COLUMN source_title TEXT NOT NULL DEFAULT ''");
+        self::ensureColumnExists($pdo, 'clues', 'source_url', "ALTER TABLE clues ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
+        self::ensureColumnExists($pdo, 'clues', 'source_date', "ALTER TABLE clues ADD COLUMN source_date TEXT NOT NULL DEFAULT ''");
 
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS clue_map_items (
@@ -121,6 +130,7 @@ final class Database
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_map_items_category ON map_items(category)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_map_items_status ON map_items(status)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_clues_hunt_id ON clues(hunt_id)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_clues_source_type ON clues(source_type)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_clues_status ON clues(status)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_clue_map_items_clue_id ON clue_map_items(clue_id)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_clue_map_items_map_item_id ON clue_map_items(map_item_id)');

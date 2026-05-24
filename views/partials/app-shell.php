@@ -3,7 +3,7 @@
         <header class="workspace-header">
             <div>
                 <p class="eyebrow">Elevated Host</p>
-                <h1>Operations Map</h1>
+                <h1>Treasure Hunt Workspace</h1>
                 <p class="microcopy" id="active-hunt-name">No active hunt</p>
             </div>
             <button type="button" class="icon-button" id="toggle-sidebar" aria-label="Hide workspace">
@@ -91,7 +91,7 @@
         <section class="workspace-pane" data-workspace-panel="board" aria-label="Reasoning board">
             <div class="workspace-pane-header">
                 <div>
-                    <h2>Reasoning Board</h2>
+                    <h2>Source Board</h2>
                     <p class="microcopy" id="board-summary">No evidence graph</p>
                 </div>
                 <button type="button" class="icon-button" id="fit-reasoning-board" aria-label="Fit reasoning board">
@@ -142,11 +142,11 @@
                     <input type="hidden" id="feature-type" value="marker">
                     <label>
                         <span>Name</span>
-                        <input type="text" id="feature-name" placeholder="Feature name" required>
+                        <input type="text" id="feature-name" placeholder="Place, landmark, route, or search zone" required>
                     </label>
                     <label>
                         <span>Description</span>
-                        <textarea id="feature-description" rows="3" placeholder="Metadata, clues, or notes"></textarea>
+                        <textarea id="feature-description" rows="3" placeholder="Geographic evidence, notes, or why this place matters"></textarea>
                     </label>
                     <div class="dual-fields">
                         <label>
@@ -158,6 +158,17 @@
                         <label>
                             <span>Category</span>
                             <select id="feature-category">
+                                <option value="candidate_location">Candidate Location</option>
+                                <option value="landmark">Landmark</option>
+                                <option value="evidence">Evidence</option>
+                                <option value="reference">Reference</option>
+                                <option value="search_area">Search Area</option>
+                                <option value="route">Route</option>
+                            </select>
+                        </label>
+                        <label class="legacy-category-field hidden">
+                            <span>Legacy Category</span>
+                            <select id="feature-category-legacy">
                                 <option value="reference">Reference</option>
                                 <option value="clue">Clue</option>
                                 <option value="evidence">Evidence</option>

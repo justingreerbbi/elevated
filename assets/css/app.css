@@ -381,6 +381,7 @@ button {
 
 .stack-form input[type="text"],
 .stack-form input[type="search"],
+.stack-form input[type="url"],
 .stack-form input[type="number"],
 .stack-form textarea,
 .stack-form select,
@@ -836,7 +837,8 @@ button {
 }
 
 #hunt-form,
-#preferences-form {
+#preferences-form,
+#clue-form {
 	flex: 1;
 	min-height: 0;
 	overflow: auto;
@@ -1059,6 +1061,7 @@ button {
 	padding: 18px;
 	display: flex;
 	flex-direction: column;
+	min-height: 0;
 	background: rgba(7, 15, 22, 0.95);
 }
 
@@ -1442,6 +1445,7 @@ html, body {
     width: min(440px, calc(100vw - 24px));
     max-height: min(84vh, 84dvh);
     padding: 14px;
+    min-height: 0;
 }
 
 .preferences-card {
@@ -1785,6 +1789,31 @@ select,
     background: transparent;
 }
 
+.dialog-card > .modal-header {
+    flex: 0 0 auto;
+}
+
+.dialog-card .stack-form {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 4px;
+    scroll-padding-bottom: 84px;
+}
+
+.dialog-card .modal-actions,
+.info-modal-card .modal-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    flex: 0 0 auto;
+    margin-right: -4px;
+    padding: 10px 0 0;
+    background: linear-gradient(180deg, rgba(7, 8, 10, 0), rgba(7, 8, 10, 0.98) 26%);
+    box-shadow: 0 -18px 24px rgba(7, 8, 10, 0.72);
+}
+
 .info-modal-card {
     height: auto;
     max-height: calc(100dvh - 96px);
@@ -2048,4 +2077,184 @@ select,
     .info-modal { left: 12px; right: 66px; width: auto; }
     .tool-button { min-width: 42px; width: 42px; padding: 0; }
     .map-compass { right: 64px; top: 64px; }
+}
+
+@media (max-width: 720px) {
+    :root {
+        --sidebar-width: min(88vw, 330px);
+        --control-height: 40px;
+    }
+
+    .sidebar {
+        width: var(--sidebar-width);
+        max-width: calc(100vw - 56px);
+    }
+
+    .sidebar.collapsed {
+        transform: translateX(calc(-100% - 8px));
+    }
+
+    .workspace-commandbar {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .command-button,
+    .workspace-tab {
+        min-width: 0;
+        font-size: 0.7rem;
+    }
+
+    .search-shell {
+        top: 10px;
+        left: 58px;
+        right: 58px;
+        width: auto;
+    }
+
+    .app-shell:not(.sidebar-collapsed) .search-shell,
+    .app-shell:not(.sidebar-collapsed) .tool-rail,
+    .app-shell:not(.sidebar-collapsed) .layer-panel,
+    .app-shell:not(.sidebar-collapsed) .map-compass {
+        opacity: 0;
+        pointer-events: none;
+    }
+
+    .app-shell.sidebar-collapsed .search-shell {
+        left: 58px;
+        right: 58px;
+        width: auto;
+    }
+
+    .floating-toggle {
+        top: 10px;
+        left: 10px;
+        width: 40px;
+        padding: 0;
+    }
+
+    .floating-toggle span {
+        display: none;
+    }
+
+    .tool-rail {
+        top: 58px;
+        right: 10px;
+        gap: 5px;
+        max-height: calc(100dvh - 140px);
+        overflow-y: auto;
+    }
+
+    .tool-button {
+        width: 40px;
+        min-width: 40px;
+        min-height: 38px;
+    }
+
+    .map-compass {
+        top: 10px;
+        right: 10px;
+        width: 40px;
+        height: 40px;
+    }
+
+    .map-compass-ring {
+        inset: 5px;
+    }
+
+    .map-compass-needle::before {
+        border-left-width: 5px;
+        border-right-width: 5px;
+        border-bottom-width: 13px;
+    }
+
+    .layer-panel {
+        top: 58px;
+        left: 10px;
+        right: 58px;
+        width: auto;
+        max-height: min(46dvh, 320px);
+    }
+
+    .info-modal,
+    .app-shell.sidebar-collapsed .info-modal {
+        top: 58px;
+        left: 10px;
+        right: 58px;
+        bottom: 58px;
+        width: auto;
+        max-height: none;
+    }
+
+    .info-modal-card {
+        height: 100%;
+        max-height: none;
+    }
+
+    .status-card {
+        left: 10px;
+        right: 10px;
+        bottom: 10px;
+        font-size: 0.68rem;
+    }
+
+    .dialog-layer {
+        align-items: stretch;
+        padding: 10px;
+    }
+
+    .dialog-card,
+    .preferences-card {
+        width: 100%;
+        max-height: calc(100dvh - 20px);
+    }
+
+    .dialog-card .stack-form {
+        min-height: 0;
+        overflow: auto;
+        padding-right: 2px;
+    }
+
+    .dual-fields {
+        grid-template-columns: 1fr;
+        flex-direction: column;
+    }
+}
+
+@media (max-width: 520px) {
+    .workspace-header {
+        padding: 12px;
+    }
+
+    .workspace-header h1 {
+        font-size: 0.94rem;
+    }
+
+    .search-shell {
+        left: 54px;
+        right: 54px;
+    }
+
+    .info-modal,
+    .app-shell.sidebar-collapsed .info-modal {
+        right: 54px;
+    }
+
+    .item-actions {
+        gap: 4px;
+    }
+
+    .mini-button,
+    .icon-button {
+        width: 32px;
+        height: 32px;
+    }
+
+    .modal-actions {
+        gap: 8px;
+    }
+
+    .action-icon {
+        width: 42px;
+        height: 42px;
+    }
 }

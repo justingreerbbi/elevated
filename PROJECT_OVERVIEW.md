@@ -352,25 +352,29 @@ LineString
 Allowed `category` values:
 
 ```text
-clue
+candidate_location
+landmark
 evidence
 search_area
 route
 reference
-exclusion
 ```
 
 ### Category Meanings
 
-#### `clue`
+#### `candidate_location`
 
-A map item directly tied to clue logic.
+A possible treasure location or search target.
 
 Example:
 
 ```text
 Possible location for "the foot of three."
 ```
+
+#### `landmark`
+
+A named or visible place that may anchor clue interpretation.
 
 #### `evidence`
 
@@ -398,9 +402,7 @@ A neutral point of interest.
 
 This is the default category.
 
-#### `exclusion`
-
-A place or area that has been ruled out or should be avoided.
+Legacy `clue` and `exclusion` categories may exist in older data and should continue to load, but new records should use the categories above. Ruled-out logic belongs in status or clue relationships rather than a new exclusion category.
 
 ---
 
@@ -492,6 +494,10 @@ CREATE TABLE IF NOT EXISTS clues (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hunt_id INTEGER NOT NULL,
     title TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'other',
+    source_title TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    source_date TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL DEFAULT '',
     interpretation TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'open',
@@ -518,6 +524,32 @@ Cast your pole
 Ancient gates
 Bride's veil
 ```
+
+#### `source_type`
+
+Where the clue came from.
+
+Allowed values:
+
+```text
+book_content
+social_media
+interview
+website
+other
+```
+
+#### `source_title`
+
+Optional source title, such as a book, page, post, interview, or web page.
+
+#### `source_url`
+
+Optional HTTP/HTTPS source URL.
+
+#### `source_date`
+
+Optional publication, post, interview, or observation date.
 
 #### `body`
 

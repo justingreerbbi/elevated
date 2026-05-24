@@ -106,6 +106,23 @@
 		contradicts: 0.35,
 	};
 	const REASONING_MAX_HEX_CANDIDATES = 1600;
+	const CLUE_SOURCE_TYPE_LABELS = {
+		book_content: "Book Content",
+		social_media: "Social Media",
+		interview: "Interview",
+		website: "Website",
+		other: "Other",
+	};
+	const MAP_ITEM_CATEGORY_LABELS = {
+		candidate_location: "Candidate Location",
+		landmark: "Landmark",
+		search_area: "Search Area",
+		route: "Route",
+		reference: "Reference",
+		evidence: "Evidence",
+		clue: "Legacy Clue",
+		exclusion: "Legacy Exclusion",
+	};
 
 	const state = {
 		config: null,
@@ -244,6 +261,9 @@
 		const collapsed = selectors.sidebar.hasClass("collapsed");
 		selectors.appShell.toggleClass("sidebar-collapsed", collapsed);
 		selectors.showSidebar.toggleClass("hidden", !collapsed);
+		if (state.map) {
+			window.setTimeout(() => state.map.resize(), 240);
+		}
 	}
 
 	function setWorkspacePanel(panelName) {
@@ -310,6 +330,14 @@
 		return $("<div>")
 			.text(value || "")
 			.html();
+	}
+
+	function clueSourceTypeLabel(sourceType) {
+		return CLUE_SOURCE_TYPE_LABELS[sourceType] || CLUE_SOURCE_TYPE_LABELS.other;
+	}
+
+	function mapItemCategoryLabel(category) {
+		return MAP_ITEM_CATEGORY_LABELS[category] || MAP_ITEM_CATEGORY_LABELS.reference;
 	}
 
 	function currentHunt() {
@@ -840,6 +868,8 @@
 		$("#feature-description").val("");
 		$("#feature-color").val("#ff6b35");
 		$("#feature-category").val("reference");
+		$("#feature-category-legacy").val("reference");
+		$(".legacy-category-field").addClass("hidden");
 		$("#feature-status").val("active");
 		$("#feature-confidence").val("50");
 		$("#feature-lat").val("");
@@ -977,12 +1007,14 @@
 
 		features.forEach((feature) => {
 			const confidenceLabel = window.Elevated && window.Elevated.utils ? window.Elevated.utils.confidenceLabel(feature.confidence) : "";
+			const categoryLabel = mapItemCategoryLabel(feature.category || "reference");
 			const item = $(
 				`<div class="feature-item" data-id="${feature.id}">
 					<div class="item-main">
 						<h4><span class="feature-swatch" style="background:${escapeHtml(feature.color)}"></span>${escapeHtml(feature.name)}</h4>
 						<div class="item-meta">
 							<span class="item-chip">${escapeHtml(feature.type)}</span>
+							<span class="item-chip">${escapeHtml(categoryLabel)}</span>
 							<span class="item-chip">${escapeHtml(feature.status || "active")}</span>
 							<span class="item-chip">${escapeHtml(String(feature.confidence ?? 50))}% ${escapeHtml(confidenceLabel)}</span>
 						</div>
@@ -1036,6 +1068,10 @@
 	function resetClueForm() {
 		$("#clue-id").val("");
 		$("#clue-title").val("");
+		$("#clue-source-type").val("other");
+		$("#clue-source-title").val("");
+		$("#clue-source-url").val("");
+		$("#clue-source-date").val("");
 		$("#clue-body").val("");
 		$("#clue-interpretation").val("");
 		$("#clue-status").val("open");
@@ -1051,6 +1087,10 @@
 			$("#clue-modal-title").text("Edit Clue");
 			$("#clue-id").val(String(clue.id));
 			$("#clue-title").val(clue.title || "");
+			$("#clue-source-type").val(clue.source_type || "other");
+			$("#clue-source-title").val(clue.source_title || "");
+			$("#clue-source-url").val(clue.source_url || "");
+			$("#clue-source-date").val(clue.source_date || "");
 			$("#clue-body").val(clue.body || "");
 			$("#clue-interpretation").val(clue.interpretation || "");
 			$("#clue-status").val(clue.status || "open");
@@ -1096,11 +1136,13 @@
 		clues.forEach((clue) => {
 			const confidenceLabel = window.Elevated && window.Elevated.utils ? window.Elevated.utils.confidenceLabel(clue.confidence) : "";
 			const linkCount = state.clueMapItems.filter((link) => Number(link.clue_id) === Number(clue.id)).length;
+			const sourceLabel = clueSourceTypeLabel(clue.source_type);
 			const item = $(
 				`<div class="feature-item" data-id="${clue.id}">
 					<div class="item-main">
 						<h4>${escapeHtml(clue.title)}</h4>
 						<div class="item-meta">
+							<span class="item-chip">${escapeHtml(sourceLabel)}</span>
 							<span class="item-chip">${escapeHtml(clue.status || "open")}</span>
 							<span class="item-chip">${escapeHtml(String(clue.confidence ?? 50))}% ${escapeHtml(confidenceLabel)}</span>
 							<span class="item-chip">${linkCount} links</span>
@@ -1147,9 +1189,10 @@
 			elements.push({
 				data: {
 					id: `clue-${clue.id}`,
-					label: clue.title || `Clue ${clue.id}`,
+					label: `${clueSourceTypeLabel(clue.source_type)}\n${clue.title || `Clue ${clue.id}`}`,
 					type: "clue",
 					status: clue.status || "open",
+					sourceType: clueSourceTypeLabel(clue.source_type),
 				},
 			});
 			elements.push({
@@ -1568,6 +1611,7 @@
 		const displayGeometry = featureDisplayGeometry(feature);
 		const rows = [
 			{ label: "Type", value: feature.type },
+			{ label: "Category", value: mapItemCategoryLabel(feature.category || "reference") },
 			{ label: "Hunt", value: currentHunt() ? currentHunt().name : String(feature.hunt_id) },
 			{ label: "Color", value: feature.color },
 		];
@@ -1713,20 +1757,33 @@
 
 		selectors.infoKicker.text("Reasoning Board");
 		selectors.infoTitle.text(clue.title || "Clue");
-		selectors.infoSubtitle.text("Linked spatial evidence");
+		selectors.infoSubtitle.text(clueSourceTypeLabel(clue.source_type));
 		renderInfoGrid([
+			{ label: "Source", value: clueSourceTypeLabel(clue.source_type) },
 			{ label: "Status", value: clue.status || "open" },
 			{ label: "Confidence", value: `${Number(clue.confidence || 0)}%` },
 			{ label: "Links", value: String(linkedMapItems.length) },
-			{ label: "Overlay", value: state.reasoningOverlayEnabled ? "On" : "Off" },
 		]);
+		const sourceDetails = [
+			clue.source_title ? `<div><span>Title</span><strong>${escapeHtml(clue.source_title)}</strong></div>` : "",
+			clue.source_date ? `<div><span>Date</span><strong>${escapeHtml(clue.source_date)}</strong></div>` : "",
+			clue.source_url ? `<div><span>URL</span><strong>${escapeHtml(clue.source_url)}</strong></div>` : "",
+		].filter(Boolean).join("");
 		selectors.infoContent.html(`
+			<div class="info-section">
+				<strong>Source</strong>
+				${sourceDetails ? `<div class="info-detail-list">${sourceDetails}</div>` : '<p class="info-note">No source details recorded.</p>'}
+			</div>
+			<div class="info-section">
+				<strong>Interpretation</strong>
+				<p class="info-note">${escapeHtml(clue.interpretation || clue.body || "No interpretation recorded.")}</p>
+			</div>
 			<div class="info-section">
 				<strong>Linked Map Items</strong>
 				${linkedMapItems.length ? linkedMapItems.map((entry) => `
 					<div class="reasoning-contribution">
 						<strong>${escapeHtml(entry.mapItem.name)}</strong>
-						<span>${escapeHtml(entry.link.relationship_type || "supports")} | ${escapeHtml(entry.mapItem.category || "reference")} | ${escapeHtml(entry.mapItem.type || "marker")}</span>
+						<span>${escapeHtml(entry.link.relationship_type || "supports")} | ${escapeHtml(mapItemCategoryLabel(entry.mapItem.category || "reference"))} | ${escapeHtml(entry.mapItem.type || "marker")}</span>
 					</div>
 				`).join("") : '<p class="info-note">This clue is not linked to a map item yet.</p>'}
 			</div>
@@ -1791,7 +1848,15 @@
 		$("#feature-name").val(safeFeature.name);
 		$("#feature-description").val(safeFeature.description);
 		$("#feature-color").val(safeFeature.color);
-		$("#feature-category").val(safeFeature.category);
+		if (MAP_ITEM_CATEGORY_LABELS[safeFeature.category] && (safeFeature.category === "clue" || safeFeature.category === "exclusion")) {
+			$(".legacy-category-field").removeClass("hidden");
+			$("#feature-category-legacy").val(safeFeature.category);
+			$("#feature-category").val("reference");
+		} else {
+			$(".legacy-category-field").addClass("hidden");
+			$("#feature-category").val(MAP_ITEM_CATEGORY_LABELS[safeFeature.category] ? safeFeature.category : "reference");
+			$("#feature-category-legacy").val("reference");
+		}
 		$("#feature-status").val(safeFeature.status);
 		$("#feature-confidence").val(String(safeFeature.confidence));
 
@@ -1867,7 +1932,7 @@
 			id: $("#feature-id").val() ? Number($("#feature-id").val()) : null,
 			hunt_id: state.activeHuntId,
 			type,
-			category: $("#feature-category").val(),
+			category: $(".legacy-category-field").hasClass("hidden") ? $("#feature-category").val() : $("#feature-category-legacy").val(),
 			name: $("#feature-name").val().trim(),
 			description: $("#feature-description").val().trim(),
 			color: $("#feature-color").val(),
@@ -3908,6 +3973,10 @@
 		const payload = {
 			hunt_id: state.activeHuntId,
 			title: $("#clue-title").val().trim(),
+			source_type: $("#clue-source-type").val(),
+			source_title: $("#clue-source-title").val().trim(),
+			source_url: $("#clue-source-url").val().trim(),
+			source_date: $("#clue-source-date").val().trim(),
 			body: $("#clue-body").val().trim(),
 			interpretation: $("#clue-interpretation").val().trim(),
 			status: $("#clue-status").val(),

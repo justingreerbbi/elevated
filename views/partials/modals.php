@@ -64,9 +64,15 @@
         </div>
         <form id="clue-form" class="stack-form">
             <input type="hidden" id="clue-id" value="">
-            <label><span>Title</span><input type="text" id="clue-title" placeholder="Add clue title" required></label>
-            <label><span>Body</span><textarea id="clue-body" rows="3" placeholder="Raw clue text or note"></textarea></label>
-            <label><span>Interpretation</span><textarea id="clue-interpretation" rows="3" placeholder="Your current interpretation"></textarea></label>
+            <label><span>Title</span><input type="text" id="clue-title" placeholder="Clue, hint, quote, post, or finding" required></label>
+            <div class="dual-fields">
+                <label><span>Source Type</span><select id="clue-source-type"><option value="book_content">Book Content</option><option value="social_media">Social Media</option><option value="interview">Interview</option><option value="website">Website</option><option value="other">Other</option></select></label>
+                <label><span>Source Date</span><input type="text" id="clue-source-date" placeholder="Published, posted, or observed"></label>
+            </div>
+            <label><span>Source Title</span><input type="text" id="clue-source-title" placeholder="Book, page, post, interview, or web page"></label>
+            <label><span>Source URL</span><input type="url" id="clue-source-url" placeholder="https://example.com/source"></label>
+            <label><span>Raw Clue</span><textarea id="clue-body" rows="3" placeholder="Raw clue text, quote, transcript excerpt, post, or note"></textarea></label>
+            <label><span>Interpretation</span><textarea id="clue-interpretation" rows="3" placeholder="What this clue may mean"></textarea></label>
             <div class="dual-fields">
                 <label><span>Status</span><select id="clue-status"><option value="open">Open</option><option value="possible">Possible</option><option value="likely">Likely</option><option value="ruled_out">Ruled Out</option><option value="confirmed">Confirmed</option></select></label>
                 <label><span>Confidence (0-100)</span><input type="number" min="0" max="100" step="1" id="clue-confidence" value="50"></label>

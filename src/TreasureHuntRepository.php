@@ -16,8 +16,10 @@ final class TreasureHuntRepository
     ];
 
     private const MAP_ITEM_TYPES = ['marker', 'polygon', 'circle', 'line'];
-    private const MAP_ITEM_CATEGORIES = ['clue', 'evidence', 'search_area', 'route', 'reference', 'exclusion'];
+    private const MAP_ITEM_CATEGORIES = ['candidate_location', 'landmark', 'search_area', 'route', 'reference', 'evidence'];
+    private const LEGACY_MAP_ITEM_CATEGORIES = ['clue', 'exclusion'];
     private const MAP_ITEM_STATUSES = ['active', 'possible', 'likely', 'ruled_out', 'confirmed'];
+    private const CLUE_SOURCE_TYPES = ['book_content', 'social_media', 'interview', 'website', 'other'];
     private const CLUE_STATUSES = ['open', 'possible', 'likely', 'ruled_out', 'confirmed'];
     private const CLUE_MAP_ITEM_RELATIONSHIP_TYPES = ['supports', 'contradicts', 'references', 'located_at'];
 
@@ -235,7 +237,7 @@ final class TreasureHuntRepository
             );
         }
 
-        return $statement->fetchAll() ?: [];
+        return array_map([$this, 'hydrateClue'], $statement->fetchAll() ?: []);
     }
 
     public function createClue(array $input): array
@@ -246,6 +248,10 @@ final class TreasureHuntRepository
             'INSERT INTO clues (
                 hunt_id,
                 title,
+                source_type,
+                source_title,
+                source_url,
+                source_date,
                 body,
                 interpretation,
                 status,
@@ -255,6 +261,10 @@ final class TreasureHuntRepository
              ) VALUES (
                 :hunt_id,
                 :title,
+                :source_type,
+                :source_title,
+                :source_url,
+                :source_date,
                 :body,
                 :interpretation,
                 :status,
@@ -278,6 +288,10 @@ final class TreasureHuntRepository
             'UPDATE clues
              SET hunt_id = :hunt_id,
                  title = :title,
+                 source_type = :source_type,
+                 source_title = :source_title,
+                 source_url = :source_url,
+                 source_date = :source_date,
                  body = :body,
                  interpretation = :interpretation,
                  status = :status,
@@ -584,7 +598,7 @@ final class TreasureHuntRepository
             throw new InvalidArgumentException('Map item type must be marker, polygon, circle, or line.');
         }
 
-        if (!in_array($category, self::MAP_ITEM_CATEGORIES, true)) {
+        if (!in_array($category, array_merge(self::MAP_ITEM_CATEGORIES, self::LEGACY_MAP_ITEM_CATEGORIES), true)) {
             throw new InvalidArgumentException('Map item category is invalid.');
         }
 
@@ -656,7 +670,18 @@ final class TreasureHuntRepository
             throw new RuntimeException('Clue not found.');
         }
 
+        return $this->hydrateClue($clue);
+    }
+
+    private function hydrateClue(array $clue): array
+    {
         $clue['confidence'] = (int) $clue['confidence'];
+        $clue['source_type'] = in_array((string) ($clue['source_type'] ?? ''), self::CLUE_SOURCE_TYPES, true)
+            ? (string) $clue['source_type']
+            : 'other';
+        $clue['source_title'] = (string) ($clue['source_title'] ?? '');
+        $clue['source_url'] = (string) ($clue['source_url'] ?? '');
+        $clue['source_date'] = (string) ($clue['source_date'] ?? '');
 
         return $clue;
     }
@@ -665,6 +690,10 @@ final class TreasureHuntRepository
     {
         $huntId = (int) ($input['hunt_id'] ?? 0);
         $title = trim((string) ($input['title'] ?? ''));
+        $sourceType = strtolower(trim((string) ($input['source_type'] ?? 'other')));
+        $sourceTitle = trim((string) ($input['source_title'] ?? ''));
+        $sourceUrl = trim((string) ($input['source_url'] ?? ''));
+        $sourceDate = trim((string) ($input['source_date'] ?? ''));
         $body = trim((string) ($input['body'] ?? ''));
         $interpretation = trim((string) ($input['interpretation'] ?? ''));
         $status = strtolower(trim((string) ($input['status'] ?? 'open')));
@@ -679,6 +708,21 @@ final class TreasureHuntRepository
             throw new InvalidArgumentException('Clue title is required.');
         }
 
+        if (!in_array($sourceType, self::CLUE_SOURCE_TYPES, true)) {
+            throw new InvalidArgumentException('Clue source type is invalid.');
+        }
+
+        if ($sourceUrl !== '' && filter_var($sourceUrl, FILTER_VALIDATE_URL) === false) {
+            throw new InvalidArgumentException('Clue source URL must be a valid URL.');
+        }
+
+        if ($sourceUrl !== '') {
+            $scheme = strtolower((string) parse_url($sourceUrl, PHP_URL_SCHEME));
+            if (!in_array($scheme, ['http', 'https'], true)) {
+                throw new InvalidArgumentException('Clue source URL must use http or https.');
+            }
+        }
+
         if (!in_array($status, self::CLUE_STATUSES, true)) {
             throw new InvalidArgumentException('Clue status is invalid.');
         }
@@ -690,6 +734,10 @@ final class TreasureHuntRepository
         return [
             ':hunt_id' => $huntId,
             ':title' => $title,
+            ':source_type' => $sourceType,
+            ':source_title' => $sourceTitle,
+            ':source_url' => $sourceUrl,
+            ':source_date' => $sourceDate,
             ':body' => $body,
             ':interpretation' => $interpretation,
             ':status' => $status,
@@ -831,11 +879,12 @@ final class TreasureHuntRepository
     {
         $category = strtolower(trim((string) ($feature['category'] ?? 'reference')));
         $status = strtolower(trim((string) ($feature['status'] ?? 'active')));
+        $validCategories = array_merge(self::MAP_ITEM_CATEGORIES, self::LEGACY_MAP_ITEM_CATEGORIES);
 
         return [
             'hunt_id' => (int) ($feature['hunt_id'] ?? 0),
             'type' => (string) ($feature['type'] ?? ''),
-            'category' => in_array($category, self::MAP_ITEM_CATEGORIES, true) ? $category : 'reference',
+            'category' => in_array($category, $validCategories, true) ? $category : 'reference',
             'name' => (string) ($feature['name'] ?? ''),
             'description' => (string) ($feature['description'] ?? ''),
             'geometry' => $feature['geometry'] ?? null,
